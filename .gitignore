@@ -1,0 +1,21 @@
+# Local databases, output, user state and collected source snapshots
+/data/
+/runs/
+/research/evidence/
+*.sqlite
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Python and local runtime artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.log
+.env
+.env.*

@@ -2,3 +2,6 @@ jsonschema==4.25.1
 psutil==7.2.2
 
 trafilatura==2.0.0
+Pillow>=10,<13
+playwright>=1.45,<2
+-r requirements-renderer.txt

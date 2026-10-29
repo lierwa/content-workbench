@@ -1,6 +1,7 @@
 """One screening, split into independently recoverable bounded segments."""
 import json
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -13,9 +14,25 @@ import jsonschema
 import psutil
 
 RULES = ['观众想纠正你', '看翻车', '打假', '站队', '蹲后续', '当军师', '代入自己', '证明自己']
-BINARY = '/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex'
+MAC_BINARY = '/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex'
 CHUNK_SIZE = 30
 TIMEOUT = 300
+
+
+def codex_binary():
+    """Resolve the CLI in the server's environment, with an explicit override."""
+    configured = os.environ.get('CODEX_BINARY')
+    if configured:
+        binary = shutil.which(os.path.expanduser(configured))
+        if not binary:
+            raise RuntimeError('CODEX_BINARY 指定的 Codex 不存在或不可执行：' + configured)
+        return binary
+    binary = (shutil.which('codex.exe') if os.name == 'nt' else None) or shutil.which('codex')
+    if binary:
+        return binary
+    if os.path.isfile(MAC_BINARY) and os.access(MAC_BINARY, os.X_OK):
+        return MAC_BINARY
+    raise RuntimeError('未找到 Codex CLI；请在服务运行环境安装并登录 Codex，或设置 CODEX_BINARY 为可执行文件路径')
 
 
 def timestamp():
@@ -53,9 +70,10 @@ def schema_for(items):
 
 
 def invoke(argv, prompt, output, error, cwd, cancel=None):
+    """Invoke Codex with CLI arguments (excluding the executable)."""
     if cancel is not None and cancel.is_set():
         raise RuntimeError('执行已停止')
-    proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=output, stderr=error,
+    proc = subprocess.Popen([codex_binary(), *argv], stdin=subprocess.PIPE, stdout=output, stderr=error,
                             cwd=cwd, start_new_session=True)
     try:
         root_created = psutil.Process(proc.pid).create_time()
@@ -136,7 +154,7 @@ def run_segment(batch_dir, number, items, rule_text, cancel=None):
     schema = schema_for(items)
     write_json(attempt / 'schema.json', schema)
     final_path = attempt / 'final.json'
-    argv = [BINARY, 'exec', '--ignore-user-config', '--ephemeral', '--skip-git-repo-check',
+    argv = ['exec', '--ignore-user-config', '--ephemeral', '--skip-git-repo-check',
             '--sandbox', 'read-only', '--disable', 'shell_tool', '--disable', 'unified_exec',
             '--model', 'gpt-6.1-terra', '-c', 'model_reasoning_effort="ultra"',
             '-c', 'approval_policy="never"', '-c', 'web_search="disabled"',

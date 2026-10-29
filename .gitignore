@@ -14,8 +14,13 @@
 
 # Python and local runtime artifacts
 __pycache__/
+.venv/
 *.py[cod]
 .pytest_cache/
 *.log
 .env
 .env.*
+
+# Generated frontend bundle and single-collection run artifacts
+/frontend/dist/
+/outputs/*-single-collection/

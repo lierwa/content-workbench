@@ -1,6 +1,0 @@
-{
-  "timezone": "Asia/Shanghai",
-  "scheduler": {"enabled": false, "times": []},
-  "sources": ["toutiao", "baidu", "bilibili", "weibo", "zhihu"],
-  "historical_provider": {"enabled": false}
-}

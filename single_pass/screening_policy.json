@@ -1,0 +1,12 @@
+{
+  "version": "2026-10-31.1",
+  "prompt_version": "progressive-evidence-3",
+  "reader_version": "2026-10-31.1",
+  "budget_seconds": null,
+  "retries": 0,
+  "initial_chunk_chars": 70000,
+  "discovery_chunk_chars": 24000,
+  "verification_chunk_chars": 70000,
+  "model": "gpt-6.1-terra",
+  "reasoning_effort": "low"
+}

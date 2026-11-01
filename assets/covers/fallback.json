@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "status": "approved",
+  "image": "common-v8-subtle-brand.png",
+  "sha256": "c504e639463fe65d8143619b4f3b6daf43936fa9a6321edb18508b40eafb52af",
+  "width": 1860,
+  "height": 845,
+  "brand": "薄闻录",
+  "main_text": "热点精选 · 科技简报",
+  "brand_style": "italic_slash_low_contrast",
+  "use": "cover_only_after_original_and_same_event_reports",
+  "selection": "用户选择 subtle-or-no-brand-comparison.png 第一版 A"
+}

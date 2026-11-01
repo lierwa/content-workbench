@@ -1,0 +1,50 @@
+[
+  {
+    "id": "A",
+    "label": "贴边横排",
+    "file": "name-option-A.png",
+    "font_size": 40,
+    "tracking": 9,
+    "weight": "Bold",
+    "treatment": "plain",
+    "color": "#94A3E8",
+    "right_ratio": 0.77,
+    "center_y": 73
+  },
+  {
+    "id": "B",
+    "label": "小号宽字距",
+    "file": "name-option-B.png",
+    "font_size": 32,
+    "tracking": 14,
+    "weight": "Regular",
+    "treatment": "plain",
+    "color": "#94A3E8",
+    "right_ratio": 0.77,
+    "center_y": 73
+  },
+  {
+    "id": "C",
+    "label": "短线衔接",
+    "file": "name-option-C.png",
+    "font_size": 36,
+    "tracking": 7,
+    "weight": "Bold",
+    "treatment": "rule",
+    "color": "#94A3E8",
+    "right_ratio": 0.77,
+    "center_y": 73
+  },
+  {
+    "id": "D",
+    "label": "细框标签",
+    "file": "name-option-D.png",
+    "font_size": 32,
+    "tracking": 8,
+    "weight": "Bold",
+    "treatment": "outline",
+    "color": "#94A3E8",
+    "right_ratio": 0.77,
+    "center_y": 73
+  }
+]

@@ -12,7 +12,7 @@ from premailer import transform
 
 
 _THEMES = Path(__file__).resolve().parent.parent / 'vendor' / 'doocs-md'
-_LOCAL_MEDIA = re.compile(r'^/api/production/media/[0-9a-f]{32}-[0-9a-f]{32}\.png$')
+_LOCAL_MEDIA = re.compile(r'^/api/production/media/[0-9a-f]{32}-(?:[0-9a-f]{24}|[0-9a-f]{32})\.(?:png|jpg|jpeg)$')
 _TAGS = {'section', 'div', 'span', 'p', 'br', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote',
          'strong', 'b', 'em', 'i', 'u', 's', 'del', 'sub', 'sup', 'mark', 'a', 'img', 'figure',
          'figcaption', 'ul', 'ol', 'li', 'pre', 'code', 'hr', 'table', 'thead', 'tbody', 'tr', 'th', 'td'}

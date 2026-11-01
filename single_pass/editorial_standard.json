@@ -1,0 +1,117 @@
+{
+  "version": 3,
+  "reviewed_at": "2026-10-30",
+  "purpose": "以原帖和实际使用材料为基准，审查标题与正文的事实、改动和实质贡献。编辑判断不是流量预测或平台原创认定。",
+  "interpretation": "下面 checks 是本项目为落实用户要求和外部原则而设计的验收程序，不是任何平台的规则原文。basis 只标明相关依据，不表示外部来源要求逐段留证、必须取得热榜原帖或采用本项目判定状态。材料不足、逐段对照、版本绑定和退回流程属于本地执行规则，接受独立审查；不得包装成官方统一创作标准。",
+  "sources": [
+    {
+      "id": "TT",
+      "kind": "platform_rule",
+      "title": "头条创作者帮助中心：内容创作规则",
+      "url": "https://baike.toutiao.com/detail/211/212/570?enter_from=left_navigation",
+      "sections": [
+        "一、消重抄袭与申诉／上传与他人相似的作品",
+        "二、标题创作规范"
+      ],
+      "verified": true
+    },
+    {
+      "id": "AP",
+      "kind": "editorial_reference",
+      "title": "AP News Values and Principles: Telling the Story",
+      "url": "https://www.ap.org/about/news-values-and-principles/telling-the-story/",
+      "sections": [
+        "Use of Others’ Material",
+        "Attribution",
+        "Quotations",
+        "Visuals"
+      ],
+      "verified": true
+    },
+    {
+      "id": "REUTERS",
+      "kind": "editorial_reference",
+      "title": "Reuters Standards and Values",
+      "url": "https://reutersagency.com/about/standards-values/",
+      "sections": [
+        "The 10 Hallmarks of Reuters Journalism"
+      ],
+      "verified": true
+    },
+    {
+      "id": "USER",
+      "kind": "user_requirement",
+      "title": "本项目用户要求",
+      "requirements": [
+        "热点、低成本二创；不强求全文重写",
+        "标题保留具体吸引点，改动要有理由",
+        "不生成配图，不制造AI腔",
+        "独立审稿；不要求用户逐篇判断文字质量",
+        "页面保持最少字段；对照证据保留后台"
+      ]
+    },
+    {
+      "id": "WX",
+      "kind": "platform_rule",
+      "title": "微信公众平台运营规范",
+      "url": "https://mp.weixin.qq.com/cgi-bin/readtemplate?t=business/faq_operation_tmpl&type=info&lang=zh_CN",
+      "verified": false,
+      "limitation": "本轮未能直接读取官方页面；不能据其他平台规则声称已满足微信原创声明条件。"
+    }
+  ],
+  "checks": [
+    {
+      "id": "source_binding",
+      "kind": "project_procedure",
+      "basis": [
+        "USER",
+        "AP"
+      ],
+      "requirement": "区分从采集入口追溯的原帖与另查报道，核实正文确属同一事件。聚合入口没有唯一原帖时，可用能支持主线的可靠正文；不能冒充原帖或声称比较过未读文章。缺实际正文或主线证据才属于材料不足。"
+    },
+    {
+      "id": "title",
+      "kind": "project_check_of_platform_constraints_and_editorial_judgment",
+      "basis": [
+        "TT",
+        "USER"
+      ],
+      "requirement": "对照原标题与新标题，说明保留、删除、增加了什么。主体、动作、数字范围、确定程度须与正文及证据一致。保留有依据的具体看点；不能为改而改，不能虚构悬念、夸大后果。吸引力比较只能是有理由的编辑判断，不能保证点击率。"
+    },
+    {
+      "id": "contribution",
+      "kind": "project_editorial_judgment",
+      "basis": [
+        "TT",
+        "AP",
+        "USER"
+      ],
+      "requirement": "对照事件全部采集角度及所有已读帖子，综合实质信息并去除重复；不能只改写首篇。逐段对照取材文章的表达、叙事顺序和观点链条，指出保留、压缩、重组和新增。遗漏有材料支持的实质角度应退回；主线角度缺正文支持应标材料不足。换词、调段、拼接或仅加开头结尾不能作为实质贡献证据。必须指出读者相对主要材料多获得了什么；无需为了篇幅或改字比例强添观点。没有可证明的贡献则退回。"
+    },
+    {
+      "id": "facts",
+      "kind": "project_check_of_editorial_principles",
+      "basis": [
+        "AP",
+        "REUTERS"
+      ],
+      "requirement": "逐项核对核心断言的对应来源原句，保留人物说法、统计范围、时间、条件和不确定性。不得把单店推为全国，把相关性推为因果，把参考报道推为热榜原帖出处。署名和引用不能代替核实。"
+    },
+    {
+      "id": "expression",
+      "kind": "user_preference_editorial_judgment",
+      "basis": [
+        "USER"
+      ],
+      "requirement": "只指出能举出原句的表达问题：重复、空泛总结、机械连接、伪装亲历、无必要的标题或问句。按读者阅读节奏分段与强调；不以固定字数、段数、加粗数或所谓AI检测率判定质量。不得删掉影响理解的事实限制来追求简短。"
+    }
+  ],
+  "protocol": {
+    "independence": "审稿使用新的独立会话；不传作者的自评、标题理由、旧审稿通过结论；输入相同标准、原帖、参考材料与待审版本。独立会话仍可能有同模型偏差，不能称为外部人工审核。",
+    "evidence": "每段改动和核心事实引用须可定位到实际取材正文。模型通过字样不能覆盖无效引用或主线证据缺口。",
+    "decision": "通过、退回修改、材料不足；不使用自定总分、改字百分比或平台通过概率。",
+    "revision": "退回后只修改具体问题，再交独立会话复审。结论绑定标题正文、来源快照与标准版本，不能沿用到另一份稿件。",
+    "scope": "本规则运行时审查标题与正文。配图许可、图文是否误导、封面裁剪和两平台实际版式须有单独的图片或页面核验；文字审稿不得声称已看图。不得据此自动勾选原创或发布。",
+    "cost": "记录真实调用量、耗时、返工和人工介入；材料与同稿跨平台结果在版本一致时复用。没有实际测量不得宣称低成本。"
+  }
+}

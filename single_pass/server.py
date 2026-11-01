@@ -7,13 +7,15 @@ import errno
 import mimetypes
 import re
 import threading
+import time
 import uuid
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urlsplit, parse_qs
 
 from . import collect, screen, review, production, platforms
+from . import screening_policy as policy
 
 if os.name == 'nt':
     import msvcrt
@@ -45,13 +47,14 @@ def lock_instance(lock):
 
 class App:
     def __init__(self, data=DATA):
-        self.data = Path(data)
+        self.data = Path(data).resolve()
         self.data.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         self.busy = False
         self.ranking_busy = False
         self.thread = None
         self.cancel_event = threading.Event()
+        self.platform = None
         self.batch_id = None
         pointer = self.data / 'current.json'
         if pointer.exists():
@@ -71,7 +74,7 @@ class App:
                 if result_path.exists():
                     initial=json.loads(result_path.read_text(encoding='utf-8'))
                     refs={x['ref'] for x in self._items() if x.get('source_id')!='bilibili'}
-                    review.prepare(self._dir(),sum(bool(x['rules']) for x in initial if x['ref'] in refs))
+                    review.prepare(self._dir(),sum(policy.advanced(x) for x in initial if x['ref'] in refs))
                 ranking_status = self._dir() / 'review' / 'ranking-status.json'
                 if ranking_status.exists():
                     value = json.loads(ranking_status.read_text(encoding='utf-8'))
@@ -106,11 +109,15 @@ class App:
             results=[value for value in original if value['ref'] in refs]
             removed=[item for item in raw_items if item.get('source_id')=='bilibili']
             removed_refs={item['ref'] for item in removed}
-            excluded=[{'source_id':'bilibili','count':len(removed),'initial_kept':sum(bool(value['rules']) for value in original if value['ref'] in removed_refs)}] if removed else []
-            return {'status': batch['status'], 'batch': {k: batch.get(k) for k in ('id', 'started_at', 'finished_at', 'sources')},
+            excluded=[{'source_id':'bilibili','count':len(removed),'initial_kept':sum(policy.advanced(value) for value in original if value['ref'] in removed_refs)}] if removed else []
+            input_path = self._dir() / 'event-inputs.json'
+            initial_total = len(json.loads(input_path.read_text(encoding='utf-8'))) if input_path.exists() else len(items)
+            return {'screening_policy': {'version': policy.config()['version'], 'hash': policy.policy_hash()},
+                    'validation': batch.get('validation'),
+                    'status': batch['status'], 'batch': {k: batch.get(k) for k in ('id', 'started_at', 'finished_at', 'sources', 'screening_refs')},
                     'items': items, 'results': results,
-                    'progress': {'completed': len(results), 'total': len(items)}, 'error': batch.get('error'),
-                    'excluded_sources':excluded,'review':review.view(self._dir(),sum(bool(value['rules']) for value in results))}
+                    'progress': {'completed': len(results), 'total': initial_total}, 'error': batch.get('error'),
+                    'excluded_sources':excluded,'review':review.view(self._dir(),sum(policy.advanced(value) for value in results))}
 
     def candidates(self, batch_id):
         with self.lock:
@@ -118,8 +125,10 @@ class App:
                 raise ValueError('批次已变化，请刷新')
             return self.state()
 
-    def start_collect(self):
+    def start_collect(self, limit=collect.DEFAULT_LIMIT):
         with self.lock:
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+                raise ValueError('采集总量须为正整数')
             if self.busy:
                 raise ValueError('正在采集或筛选，请等待完成')
             self.busy = True
@@ -130,7 +139,7 @@ class App:
                 (path / 'snapshots').mkdir()
                 (path / 'runtime').mkdir()
                 batch = {'id': self.batch_id, 'status': 'collecting', 'started_at': collect.now(),
-                         'finished_at': None, 'sources': [], 'error': None}
+                         'finished_at': None, 'sources': [], 'error': None, 'collection_limit': limit}
                 self._save(batch)
                 screen.write_json(self.data / 'current.json', {'batch_id': self.batch_id})
                 self.thread = threading.Thread(target=self._collect, name='single-collection')
@@ -145,7 +154,8 @@ class App:
             batch = self._batch()
             items = []
             responses = {}
-            for source, name in collect.SOURCES.items():
+            quota, extra = divmod(batch['collection_limit'], len(collect.SOURCES))
+            for source_index, (source, name) in enumerate(collect.SOURCES.items()):
                 key = 'tophub' if source in ('weibo', 'zhihu') else source
                 try:
                     if key not in responses:
@@ -162,12 +172,15 @@ class App:
                     rows = collect.PARSERS[source](raw)
                     if not rows:
                         raise ValueError('榜单为空或无法解析')
+                    available_count = len(rows)
+                    rows = rows[:quota + (source_index < extra)]
                     for row in rows:
                         row['ref'] = source + ':' + str(row['source_ordinal'])
                         row['collected_at'] = response_at
                     items.extend(rows)
                     batch['sources'].append({'source_id': source, 'name': name, 'status': 'success',
-                                             'count': len(rows), 'error': None, 'collected_at': response_at})
+                                             'count': len(rows), 'available_count': available_count,
+                                             'error': None, 'collected_at': response_at})
                 except Exception as exc:
                     batch['sources'].append({'source_id': source, 'name': name, 'status': 'failed',
                                              'count': 0, 'error': str(exc), 'collected_at': None})
@@ -189,7 +202,7 @@ class App:
             with self.lock:
                 self.busy = False
 
-    def start_screen(self, batch_id):
+    def start_screen(self, batch_id, refs=None):
         with self.lock:
             if self.busy:
                 raise ValueError('正在采集或筛选，请等待完成')
@@ -197,22 +210,54 @@ class App:
                 raise ValueError('批次已变化，请刷新')
             batch = self._batch()
             items = self._items()
+            if refs is not None:
+                available = {item['ref'] for item in items if item.get('source_id') != 'bilibili'}
+                if not isinstance(refs, list) or not refs or any(not isinstance(ref, str) for ref in refs) or not set(refs).issubset(available):
+                    raise ValueError('小样本引用必须来自当前采集批次')
+                items = [item for item in items if item['ref'] in refs]
             if not items:
                 raise ValueError('当前批次没有可筛选条目')
             initial_path=self._dir()/'result.json'
             initial=json.loads(initial_path.read_text(encoding='utf-8')) if initial_path.exists() else []
             active_refs={item['ref'] for item in items if item.get('source_id')!='bilibili'}
             initial_active=[x for x in initial if x['ref'] in active_refs]
-            if review.view(self._dir(),sum(bool(x['rules']) for x in initial_active))['status']=='completed':
-                return {'batch_id': self.batch_id, 'status': 'completed'}
+            current_hash = policy.policy_hash()
+            input_hash = policy.digest([{k: x.get(k) for k in ('ref','title','summary','source_id','published_at','collected_at','metrics')} for x in items])
+            same_version = batch.get('screening_policy_hash') == current_hash and batch.get('screening_input_hash') == input_hash
+            if same_version:
+                current_review = review.view(self._dir(),sum(policy.advanced(x) for x in initial_active))
+                if current_review['status']=='completed' and not current_review['can_resume']:
+                    return {'batch_id': self.batch_id, 'status': 'completed'}
+            if not same_version:
+                # Keep the complete former run and snapshots, including old material paths.
+                base = self._dir().resolve()
+                archive = base / 'screening-history' / (datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:8])
+                archive.mkdir(parents=True)
+                for name in ('segments', 'result.json', 'event-inputs.json', 'review'):
+                    source, target = base / name, archive / name
+                    if not source.resolve().is_relative_to(base) or not target.resolve().is_relative_to(base):
+                        raise ValueError('筛选历史路径不在当前批次内')
+                    if source.exists(): source.rename(target)
+                screen.write_json(archive/'batch.json', batch)
+                screen.write_json(archive/'items.json', items)
+                batch.update(screening_policy_hash=current_hash, screening_input_hash=input_hash,
+                             screening_version=policy.config()['version'])
+                batch.pop('validation', None)
             self.busy = True
             self.cancel_event.clear()
-            batch.update(status='screening', error=None)
+            budget = policy.config().get('budget_seconds')
+            self.cancel_event.deadline = time.monotonic() + budget if budget else None
+            self.cancel_event.original_reader = self.platform.read_original if self.platform else None
+            self.cancel_event.prepare_original_reader = self.platform.start_persistent_session if self.platform else None
+            self.cancel_event.reference_reader = self.platform.read_reference if self.platform else None
+            self.cancel_event.original_cache = {}
+            batch.update(status='screening', error=None, screening_refs=refs)
             self._save(batch)
             timeline_path=self._dir()/'review'/'timeline.json'
             timeline_path.parent.mkdir(parents=True,exist_ok=True)
             timeline=json.loads(timeline_path.read_text(encoding='utf-8')) if timeline_path.exists() else {'runs':[]}
-            timeline['runs'].append({'started_at':screen.timestamp(),'finished_at':None})
+            timeline['runs'].append({'started_at':screen.timestamp(),'finished_at':None,
+                'policy_hash':current_hash,'budget_seconds':policy.config()['budget_seconds']})
             screen.write_json(timeline_path,timeline)
             self.thread = threading.Thread(target=self._screen, name='single-screening')
             self.thread.start()
@@ -220,8 +265,22 @@ class App:
 
     def _screen(self):
         try:
-            items = [x for x in self._items() if x.get('source_id')!='bilibili']
+            all_items = self._items()
+            scope = self._batch().get('screening_refs')
+            items = [x for x in all_items if x.get('source_id')!='bilibili' and (scope is None or x['ref'] in scope)]
             rules = (ROOT / 'docs' / '筛选规则.md').read_text(encoding='utf-8')
+            event_input_path = self._dir() / 'event-inputs.json'
+            if event_input_path.exists():
+                event_items = json.loads(event_input_path.read_text(encoding='utf-8'))
+            else:
+                store = review.Store(self._dir() / 'review', 0)
+                store.value.update(policy_version=policy.config()['version'], policy_hash=policy.policy_hash(), event_level_initial=True)
+                store.phase('grouping')
+                groups = review.group(store.root, items, None, rules, self.cancel_event)
+                event_items = screen.event_inputs(items, groups)
+                store.value['events'] = groups
+                store.phase('running', 'initial')
+                screen.write_json(event_input_path, event_items)
             def progress(done, total):
                 with self.lock:
                     batch = self._batch()
@@ -229,24 +288,25 @@ class App:
                     self._save(batch)
             result_path=self._dir()/'result.json'
             if result_path.exists():
-                refs={x['ref'] for x in items}
+                refs={x['ref'] for x in event_items}
                 rows=[x for x in json.loads(result_path.read_text(encoding='utf-8')) if x['ref'] in refs]
             else:
-                rows = screen.screen(self._dir(), items, rules, progress, cancel=self.cancel_event)
-            if len(rows) != len(items) or {r['ref'] for r in rows} != {r['ref'] for r in items}:
+                rows = review.preselect(self._dir(),event_items,items,rules,self.cancel_event)
+                progress(len(rows),len(event_items))
+            if len(rows) != len(event_items) or {r['ref'] for r in rows} != {r['ref'] for r in event_items}:
                 raise ValueError('筛选结果未完整覆盖当前批次')
             with self.lock:
                 if not result_path.exists():screen.write_json(result_path, rows)
             if self.cancel_event.is_set():raise RuntimeError('执行已停止')
-            review.run(self._dir(),items,rows,rules,self.cancel_event)
+            review.run(self._dir(),all_items,rows,rules,self.cancel_event)
             with self.lock:
-                batch = self._batch();status=review.view(self._dir(),sum(bool(x['rules']) for x in rows))['status']
-                batch.update(status='completed' if status=='completed' else 'failed', error=None if status=='completed' else '部分事件未完成，请查看并手动继续')
+                batch = self._batch();status=review.view(self._dir(),sum(policy.advanced(x) for x in rows))['status']
+                batch.update(status=status, error=None if status=='completed' else '部分事件未完成，可继续筛选')
                 self._save(batch)
         except Exception as exc:
             with self.lock:
                 batch = self._batch()
-                batch.update(status='failed', error=str(exc))
+                batch.update(status='partial', error=str(exc))
                 self._save(batch)
         finally:
             with self.lock:
@@ -257,6 +317,7 @@ class App:
                         timeline['runs'][-1]['finished_at']=screen.timestamp()
                         screen.write_json(timeline_path,timeline)
                 self.busy = False
+                self.cancel_event.deadline = None
 
     def start_rank(self, batch_id):
         with self.lock:
@@ -338,19 +399,31 @@ class Handler(BaseHTTPRequestHandler):
         if not self._allowed():
             return self._respond(403, {'error': '只允许本机访问'})
         path = urlsplit(self.path).path
+        if path == '/api/columns':
+            try: return self._respond(200, self.server.app.columns())
+            except ValueError as exc: return self._respond(409, {'error': str(exc)})
         if path == '/api/state':
             try:
-                return self._respond(200, self.server.app.state())
+                return self._respond(200, self.server.app.state(parse_qs(urlsplit(self.path).query).get('line_id', [None])[0]))
             except Exception as exc:
                 return self._respond(500, {'error': str(exc)})
+        if path == '/api/pool':
+            try:
+                filters = {k:v[0] for k,v in parse_qs(urlsplit(self.path).query).items()}
+                return self._respond(200, self.server.app.pool_view(filters))
+            except ValueError as exc: return self._respond(400, {'error': str(exc)})
         if path == '/api/production':
             try:
                 return self._respond(200, self.server.production.snapshot())
             except Exception as exc:
                 return self._respond(500, {'error': str(exc)})
+        sources = re.fullmatch(r'/api/production/jobs/([0-9a-f]{32})/sources', path)
+        if sources:
+            try: return self._respond(200, self.server.production.source_documents(sources.group(1)))
+            except ValueError as exc: return self._respond(404, {'error':str(exc)})
         if path.startswith('/api/production/media/'):
             filename = unquote(path[len('/api/production/media/'):])
-            if not re.fullmatch(r'[A-Za-z0-9_-]+\.png', filename):
+            if not re.fullmatch(r'[A-Za-z0-9_-]+\.(?:png|jpg|jpeg)', filename, re.I):
                 return self._respond(404, {'error': '媒体不存在'})
             try:
                 file = self.server.production.media_path(filename)
@@ -362,7 +435,7 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, OSError):
                 return self._respond(404, {'error': '媒体不存在'})
             self.send_response(200)
-            self.send_header('Content-Type', 'image/png')
+            self.send_header('Content-Type', 'image/png' if file.suffix.lower() == '.png' else 'image/jpeg')
             self.send_header('X-Content-Type-Options', 'nosniff')
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
@@ -390,6 +463,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self._write_allowed():
             return self._respond(403, {'error': '请求来源无效'})
         path = urlsplit(self.path).path
+        if path == '/api/columns':
+            return self._columns_write(path, 'POST')
         if path.startswith('/api/production/'):
             return self._production_write(path, 'POST')
         if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
@@ -404,13 +479,13 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 raise ValueError('请求格式无效')
             if path == '/api/collect':
-                result = self.server.app.start_collect()
+                result = self.server.app.start_collect(body.get('limit'), body.get('source_ids'), body.get('line_id'))
             elif path == '/api/screen':
-                result = self.server.app.start_screen(body.get('batch_id'))
+                result = self.server.app.start_screen(body.get('batch_id'), body.get('refs'), body.get('line_id'), body.get('format'))
             elif path == '/api/rank':
                 result = self.server.app.start_rank(body.get('batch_id'))
             else:
-                result = self.server.app.stop_screen(body.get('batch_id'))
+                result = self.server.app.stop(body.get('batch_id'))
             return self._respond(202, result)
         except (ValueError, json.JSONDecodeError) as exc:
             return self._respond(409, {'error': str(exc)})
@@ -422,24 +497,60 @@ class Handler(BaseHTTPRequestHandler):
             return self._respond(403, {'error': '只允许本机访问'})
         if not self._write_allowed():
             return self._respond(403, {'error': '请求来源无效'})
-        return self._production_write(urlsplit(self.path).path, 'PATCH')
+        path = urlsplit(self.path).path
+        if path.startswith(('/api/columns/', '/api/sources/')):
+            return self._columns_write(path, 'PATCH')
+        return self._production_write(path, 'PATCH')
+
+    def do_DELETE(self):
+        if not self._allowed() or not self._write_allowed():
+            return self._respond(403, {'error': '请求来源无效'})
+        return self._columns_write(urlsplit(self.path).path, 'DELETE')
+
+    def _columns_write(self, path, method):
+        column = re.fullmatch(r'/api/columns/([a-z][a-z0-9_-]{0,63})', path)
+        source = re.fullmatch(r'/api/sources/([a-z][a-z0-9_-]{0,63})', path)
+        if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
+            return self._respond(415, {'error': '需要 JSON 请求'})
+        try:
+            body = self._json_body(65536)
+            if method == 'POST' and path == '/api/columns':
+                result = self.server.app.save_column(body)
+            elif method == 'PATCH' and column:
+                result = self.server.app.save_column(body, column.group(1))
+            elif method == 'DELETE' and column:
+                result = self.server.app.delete_column(column.group(1), body.get('expected_revision'))
+            elif method == 'PATCH' and source:
+                result = self.server.app.save_source(source.group(1), body)
+            else:
+                return self._respond(404, {'error': '接口不存在'})
+            return self._respond(200, result)
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            return self._respond(409, {'error': str(exc)})
 
     def _production_write(self, path, method):
+        entries = re.fullmatch(r'/api/production/jobs/([A-Za-z0-9_-]+)/entries', path)
         job = re.fullmatch(r'/api/production/jobs/([A-Za-z0-9_-]+)', path)
         cover = re.fullmatch(r'/api/production/jobs/([A-Za-z0-9_-]+)/cover', path)
         body_image = re.fullmatch(r'/api/production/jobs/([A-Za-z0-9_-]+)/body-image', path)
         connect = re.fullmatch(r'/api/production/accounts/([A-Za-z0-9_-]+)/connect', path)
-        known = ((method == 'POST' and (path in ('/api/production/jobs', '/api/production/actions', '/api/production/accounts', '/api/production/preview', '/api/production/recover-pre-save', '/api/production/recover-toutiao-absent') or cover or body_image or connect))
+        known = ((method == 'POST' and (path in ('/api/production/jobs', '/api/production/actions', '/api/production/accounts', '/api/production/preview', '/api/production/session/start', '/api/production/session/end') or cover or body_image or connect or entries))
                  or (method == 'PATCH' and job))
         if not known:
             return self._respond(404, {'error': '接口不存在'})
         try:
             body = self._json_body(4 * ((10_000_000 + 2) // 3) + 65536 if cover or body_image else 2_000_000 if job or path == '/api/production/preview' else 65536)
             service = self.server.production
+            if entries:
+                if 'entry_ids' in body:
+                    return self._respond(200, service.update_entries(entries.group(1), body['entry_ids'], self._revision(body.get('expected_revision'))))
+                return self._respond(200, service.remove_entries(entries.group(1), body.get('remove_ids'), self._revision(body.get('expected_revision'))))
             if job and method == 'PATCH':
                 changes = body.get('changes')
-                if not isinstance(changes, dict) or not changes or not set(changes) <= {'title', 'summary', 'body_html', 'theme', 'work_statements', 'first_publish', 'original', 'target_account_id', 'presentation_mode'}:
+                if not isinstance(changes, dict) or not changes or not set(changes) <= {'title', 'summary', 'body_html', 'theme', 'work_statements', 'first_publish', 'original', 'target_account_id', 'presentation_mode', 'cover_url'}:
                     raise TypeError('changes 包含不支持的字段')
+                if 'cover_url' in changes and changes['cover_url'] is not None:
+                    raise TypeError('移除封面须设为空；替换须通过上传接口')
                 if any(not isinstance(changes[k], str) for k in ('title', 'summary', 'body_html', 'theme', 'target_account_id', 'presentation_mode') if k in changes):
                     raise TypeError('标题、摘要、正文、主题和目标账号必须是文本')
                 if 'target_account_id' in changes and len(changes) != 1:
@@ -469,18 +580,16 @@ class Handler(BaseHTTPRequestHandler):
                           service.upload_body_image(body_image.group(1), data, revision))
             elif connect:
                 result = service.connect_account(connect.group(1))
+            elif path == '/api/production/session/start':
+                result = service.start_persistent_session()
+            elif path == '/api/production/session/end':
+                result = service.end_persistent_session()
             elif path == '/api/production/preview':
                 platform, theme, html = body.get('platform'), body.get('theme'), body.get('body_html')
                 presentation_mode = body.get('presentation_mode')
                 if platform not in ('wechat', 'toutiao') or theme not in ('simple', 'default') or not isinstance(html, str) or presentation_mode not in (None, 'toutiao_native') or (presentation_mode == 'toutiao_native' and platform != 'toutiao'):
                     raise TypeError('预览需要有效平台、主题和正文')
                 result = service.preview(platform, theme, html, presentation_mode)
-            elif path in ('/api/production/recover-pre-save', '/api/production/recover-toutiao-absent'):
-                job_id, operation_id = body.get('job_id'), body.get('operation_id')
-                if not isinstance(job_id, str) or not re.fullmatch(r'[0-9a-f]{32}', job_id) or not isinstance(operation_id, str) or not re.fullmatch(r'[0-9a-f]{32}', operation_id):
-                    raise TypeError('任务或操作标识无效')
-                recovery = service.recover_pre_save if path == '/api/production/recover-pre-save' else service.recover_toutiao_absent
-                result = recovery(job_id, operation_id, self._revision(body.get('expected_revision')))
             elif path == '/api/production/jobs':
                 batch_id = self._string(body.get('batch_id'), 'batch_id')
                 event_ids, targets = body.get('event_ids'), body.get('targets')
@@ -488,12 +597,12 @@ class Handler(BaseHTTPRequestHandler):
                     raise TypeError('event_ids 必须是非空字符串数组')
                 if not isinstance(targets, list) or not targets:
                     raise TypeError('targets 必须是非空数组')
-                result = service.create_jobs(batch_id, event_ids, targets)
+                result = service.create_jobs(batch_id, event_ids, targets, body.get('expected_versions'))
             elif path == '/api/production/actions':
                 ids, action, revisions = body.get('job_ids'), body.get('action'), body.get('expected_revisions')
                 if not isinstance(ids, list) or not ids or not all(isinstance(x, str) and x.strip() for x in ids):
                     raise TypeError('job_ids 必须是非空字符串数组')
-                if action not in ('sync', 'confirm_publish', 'verify', 'retry', 'cancel', 'redo_writing', 'redo_editing', 'redo_formatting'):
+                if action not in ('sync', 'resume', 'confirm_publish', 'verify', 'review', 'retry', 'cancel', 'redo_writing', 'redo_editing', 'redo_formatting', 'refresh_images'):
                     raise TypeError('操作无效')
                 if not isinstance(revisions, dict) or not all(x in revisions for x in ids):
                     raise TypeError('expected_revisions 必须包含每篇稿件的版本')
@@ -531,12 +640,16 @@ def serve(port=18765, data=DATA):
     with (data / '.instance.lock').open('a+b') as lock:
         lock_instance(lock)
         server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
-        server.app = App(data)
-        server.production = production.ProductionService(data, server.app.candidates, platforms.PlatformAdapter(data))
+        from .workspace import Workspace
+        server.app = Workspace(data, App)
+        server.app.platform = platforms.PlatformAdapter(data)
+        threading.Thread(target=server.app.platform.prepare_runtime, name='browser-runtime', daemon=True).start()
+        server.production = production.ProductionService(data, server.app.candidates, server.app.platform)
+        server.app.production = server.production
+        server.app.start_scheduler()
         try:
             server.serve_forever()
         finally:
             server.server_close()
-            if server.app.thread:
-                server.app.thread.join()
+            server.app.shutdown()
             server.production.shutdown()

@@ -1,0 +1,124 @@
+{
+  "collection_limit": null,
+  "sources": {
+    "toutiao": {
+      "enabled": true,
+      "interval_minutes": null
+    },
+    "baidu": {
+      "enabled": true,
+      "interval_minutes": null
+    },
+    "weibo": {
+      "enabled": true,
+      "interval_minutes": null
+    },
+    "zhihu": {
+      "enabled": true,
+      "interval_minutes": null
+    },
+    "ithome": {
+      "enabled": true,
+      "interval_minutes": null
+    },
+    "chinanews_society": {
+      "enabled": true,
+      "interval_minutes": null
+    },
+    "bjnews_consumer": {
+      "enabled": true,
+      "interval_minutes": null
+    },
+    "geekpark": {
+      "enabled": true,
+      "interval_minutes": null
+    },
+    "ifanr": {
+      "enabled": true,
+      "interval_minutes": null
+    },
+    "solidot": {
+      "enabled": true,
+      "interval_minutes": null
+    },
+    "sspai": {
+      "enabled": true,
+      "interval_minutes": null
+    },
+    "36kr": {
+      "enabled": true,
+      "interval_minutes": null
+    },
+    "thepaper": {
+      "enabled": true,
+      "interval_minutes": null
+    },
+    "chinanews_china": {
+      "enabled": true,
+      "interval_minutes": null
+    },
+    "chinanews_finance": {
+      "enabled": true,
+      "interval_minutes": null
+    }
+  },
+  "lines": [
+    {
+      "id": "hotspots",
+      "name": "热点精选",
+      "mode": "hotspot",
+      "format": "single",
+      "sources": [
+        "toutiao",
+        "baidu",
+        "weibo",
+        "zhihu",
+        "chinanews_society",
+        "bjnews_consumer",
+        "thepaper",
+        "chinanews_china",
+        "chinanews_finance"
+      ],
+      "reference_domains": [],
+      "valid_hours": 48,
+      "edition_hours": 24,
+      "rules": "面向普通读者的热点单篇。沿用三轮递进筛选，具体看点、可做角度与正文核实分别判断。榜单名次不代表可信度。只能沿已采入口取材及读取入口实际指向的报道，不扩展关键词搜索。",
+      "interval_minutes": null,
+      "targets": [],
+      "auto_draft": false,
+      "screening_rules": {
+        "initial": "面向普通读者，寻找具体利益关联、反差、争议、人物经历或明确后续看点。八项读者动机仅解释真实吸引点，不按标签数量评分。普通播报、空泛观点、只有名气或热榜排名的条目不通过。仅使用标题、摘要、来源和时间。",
+        "selection": "比较本批候选，只选择少量值得制作独立单篇的选题。说明具体读者增益、现有线索支持的写作角度及可控取材路径。仅补背景、介绍人物或复述经过不能自动通过；不得靠假设正文另有精彩细节放行。相似选题使用同一门槛，不凑数量。",
+        "verification": "用实际正文检验看点、主线事实和写作角度是否成立，区分事实、当事人说法和推测。正文不足以支撑主线则待补证，看点不成立或只有平庸复述则不采用；只在有充分依据的范围内出稿。"
+      },
+      "max_candidates": 2
+    },
+    {
+      "id": "tech_digest",
+      "name": "科技简报",
+      "mode": "digest",
+      "format": "digest",
+      "sources": [
+        "ithome",
+        "geekpark",
+        "ifanr",
+        "solidot",
+        "sspai",
+        "36kr"
+      ],
+      "reference_domains": [],
+      "valid_hours": 24,
+      "edition_hours": 24,
+      "rules": "面向普通科技读者，选编有具体新增事实的科技产品、技术研发、人工智能及科技产业动向。排除娱乐八卦、无新增信息的旧闻、购物促销与广告。编成主题一致的科技简报，每条讲清发生了什么及实际意义，区分承诺、研发、试验、批准和已上市，不夸大为已实现；不要求争议、反转或长篇评论。沿本栏目所选媒体的已采入口读取原文，可沿原文实际引用的链接补证；合并同事件的重复报道，保留各项事实出处。消息时间必须核实，不能凑数量。",
+      "interval_minutes": null,
+      "targets": [],
+      "auto_draft": false,
+      "screening_rules": {
+        "initial": "只选择科技产品、技术研发、人工智能及科技产业的具体新增消息；排除娱乐八卦、广告促销、旧闻重发、仅更新版本号而无实际变化的内容。仅使用标题、摘要、来源和时间，不因品牌知名而放行。",
+        "selection": "从初筛候选中选出本期少量重要消息。比较新增信息、读者相关性、实际影响和整期主题，合并同事件重复；琐碎更新、空泛预测不选。不要求争议或单篇长文角度，不凑条数。",
+        "verification": "核对消息对应同一事件、发布时间、具体变化和实际状态，区分计划、测试和已经实现。主线事实必须有正文依据；不足则待补证，过时或不符栏目则不采用。"
+      },
+      "max_candidates": 5
+    }
+  ]
+}

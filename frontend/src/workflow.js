@@ -2,7 +2,7 @@ import { reactive, watch } from 'vue'
 import { isPrototype } from './api'
 const storageKey=isPrototype?'workbench-prototype-selection':'workbench-selection'
 
-const defaults = { batchId: null, lineId: 'hotspots', format: 'single', events: [], targets: [], selections: {} }
+const defaults = { batchId: null, lineId: 'hotspots', format: 'single', events: [], targets: [], selections: {}, groups: [] }
 let saved
 try { saved = JSON.parse(sessionStorage.getItem(storageKey) || 'null') } catch { saved = null }
 export const creation = reactive({ ...defaults, ...saved })

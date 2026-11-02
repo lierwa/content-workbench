@@ -72,7 +72,8 @@ def _call_model(root, stage, schema, prompt, cancel, live=False, effort=None, im
     for image in images or []:
         argv.extend(['--image', str(Path(image).resolve())])
     argv.append('-')
-    status={'stage':stage,'started_at':screen.timestamp()};started=time.monotonic()
+    status={'stage':stage,'status':'running','started_at':screen.timestamp()};started=time.monotonic()
+    screen.write_json(folder/'status.json',status)
     def save_status():
         status.update(finished_at=screen.timestamp(),elapsed_seconds=round(time.monotonic()-started,3))
         screen.write_json(folder/'status.json',status)
@@ -94,7 +95,7 @@ def _call_model(root, stage, schema, prompt, cancel, live=False, effort=None, im
         save_status()
         raise TimeoutError(status['error']) from None
     except Exception as exc:
-        status.update(status='failed',error=str(exc)[:800]);save_status()
+        status.update(status='stopped' if cancel.is_set() else 'failed',error=str(exc)[:800]);save_status()
         raise
 
 
@@ -183,6 +184,43 @@ def selection_prompt(inputs, line=None):
         +contract+'\n事件：'+json.dumps(inputs,ensure_ascii=False))
 
 
+def selection_outcome(event, value, items_by_ref):
+    if value['decision']=='advance' and (value['cost']!='bounded' or not value['angle'].strip()):
+        raise ValueError('二筛晋级缺少可做角度或成本判断')
+    if value['decision']!='advance' and value['priority'] is not None:
+        raise ValueError('未晋级不能分配取材名次')
+    if any(ev['field'] not in ('title','summary') for ev in value['evidence']):
+        raise ValueError('二筛只能引用短材料')
+    return policy.outcome('selection',value,{r:items_by_ref[r] for r in event['refs']})
+
+
+def repair_selection(root, events, items_by_ref, result, line, cancel):
+    """Repair only invalid judgments once; never accept unlocatable citations."""
+    invalid=[]
+    for event in events:
+        try: selection_outcome(event,result[event['id']],items_by_ref)
+        except ValueError as exc:
+            invalid.append({'id':event['id'],'error':str(exc),'previous':result[event['id']],
+                'items':[compact_item(items_by_ref[r]) for r in event['refs']]})
+    if not invalid: return result
+    fixed=call_model(root,'selection-evidence-repair',selection_schema([v['id'] for v in invalid]),
+        '修正二筛结果中的依据错误。只处理所列事件，只允许引用各自items中的ref和逐字title/summary。'
+        '重新核对判断、角度和每项dimensions，不能删引文掩盖依据不足。能成立则保留原decision和priority；'
+        '不能成立则改为insufficient或deferred且priority=null，不新增晋级事件。只用输入，不搜索。\n'
+        +'栏目规则：'+policy.stage_rules(line,'selection')+'\n'+json.dumps(invalid,ensure_ascii=False),cancel)['items']
+    repaired=dict(result)
+    for event in events:
+        if event['id'] not in fixed: continue
+        value=fixed[event['id']]
+        original=result[event['id']]
+        if value['decision']=='advance':
+            if original['decision']!='advance': raise ValueError('依据修正不能绕过全批比较新增晋级事件')
+            value=dict(value,priority=original['priority'])
+        selection_outcome(event,value,items_by_ref)
+        repaired[event['id']]=value
+    return repaired
+
+
 def apply_selection(store, items_by_ref, result, line=None):
     events=store.value['events']
     if set(result)!={e['id'] for e in events}: raise ValueError('二筛结果未恰好覆盖初筛候选')
@@ -200,12 +238,7 @@ def apply_selection(store, items_by_ref, result, line=None):
         value=dict(result[event['id']])
         model_priority=value['priority']
         if event['id'] in priorities: value['priority']=priorities[event['id']]
-        if value['decision']=='advance' and (value['cost']!='bounded' or not value['angle'].strip()):
-            raise ValueError('二筛晋级缺少可做角度或成本判断')
-        if value['decision']!='advance' and value['priority'] is not None: raise ValueError('未晋级不能分配取材名次')
-        inputs_by_ref={r:items_by_ref[r] for r in event['refs']}
-        if any(ev['field'] not in ('title','summary') for ev in value['evidence']): raise ValueError('二筛只能引用短材料')
-        row=policy.outcome('selection',value,inputs_by_ref)
+        row=selection_outcome(event,value,items_by_ref)
         plan={'selected':value['decision']=='advance','priority':value['priority'],'model_priority':model_priority,'reason':value['reason'],
               'angle':value['angle'],'question':'；'.join(value['unknowns'])}
         prepared.append((event,value,row,plan))
@@ -219,9 +252,70 @@ def apply_selection(store, items_by_ref, result, line=None):
         event['screening']['rounds']=[r for r in event['screening']['rounds'] if r['stage']!='selection']+[row]
         event.update(stage='queued' if value['decision']=='advance' else 'not_selected' if value['decision']=='deferred' else value['decision'],plan=plan)
         event.setdefault('stage_hashes',{})['selection']=policy.stage_hash(line,'selection')
+    store.value['selection_comparing'] = False
     store.value['selection_prompt_hash']=policy.digest(selection_prompt([],line))
     store.save()
 
+
+
+def selection_chunks(store, events, inputs, items_by_ref, line, rules, cancel):
+    """Checkpoint independent judgments; only the final comparison allocates slots."""
+    folder = store.root / 'selection-chunks'
+    folder.mkdir(exist_ok=True)
+    result = {}
+    byid = {e['id']: e for e in events}
+    store.value['selection_chunked'] = True
+    store.value['selection_comparing'] = False
+    for offset in range(0, len(inputs), 10):
+        for chunk in policy.chunks(inputs[offset:offset+10], 14000):
+            policy.remaining(cancel)
+            key = policy.digest({'inputs': chunk, 'rules': policy.stage_hash(line, 'selection'), 'policy': policy.policy_hash()})
+            path = folder / (key + '.json')
+            values = json.loads(path.read_text(encoding='utf-8')) if path.exists() else None
+            members = [byid[i['id']] for i in chunk]
+            if values is None:
+                prompt = selection_prompt(chunk, line) + (
+                    '\n执行方式修正：现在是分段价值评估，不是最终取材分配。对本段每个事件独立给出完整判断。'
+                    'advance表示值得进入最后全局比较，不受栏目取材条数限制；不能因为本段名额或相对排名低判deferred或drop。'
+                    '所有段完成后将统一决定最终取材名单。本段advance按优先级编号即可，不读取正文。')
+                values = call_model(store.root, 'selection-chunk', selection_schema([i['id'] for i in chunk]), prompt, cancel, effort='low')['items']
+                if set(values) != {i['id'] for i in chunk}: raise ValueError('二筛分段结果没有覆盖本段名单')
+                values = repair_selection(store.root, members, items_by_ref, values, line, cancel)
+                for event in members: selection_outcome(event, values[event['id']], items_by_ref)
+                screen.write_json(path, values)
+            for event in members:
+                event['selection_check'] = values[event['id']]
+            result.update(values)
+            store.save()
+    store.value['selection_comparing'] = True
+    store.save()
+    candidates = [e for e in events if result[e['id']]['decision'] == 'advance']
+    if candidates:
+        summaries = [{'id': e['id'], 'title': items_by_ref[e['refs'][0]]['title'],
+                      **{k: result[e['id']][k] for k in ('angle', 'reason', 'cost', 'unknowns')}} for e in candidates]
+        basis = policy.digest({'candidates': summaries, 'limit': policy.selection_limit(line), 'rules': rules})
+        path = folder / ('comparison-' + basis + '.json')
+        choice = json.loads(path.read_text(encoding='utf-8')) if path.exists() else None
+        if choice is None:
+            schema = obj({'selected': {'type': 'array', 'maxItems': policy.selection_limit(line),
+                                      'items': obj({'id': {'type': 'string', 'enum': [e['id'] for e in candidates]}, 'reason': S})}})
+            choice = call_model(store.root, 'selection-comparison', schema,
+                '所有事件已分段完成有依据的价值评估。现在对以下全部候选统一比较，决定本轮最终取材顺序。'
+                '比较读者增益、主题重复和取材成本；不限每段配额，不强行填满。只使用给出的判断，不搜索、不重做事实核验。'
+                f'最多选择 {policy.selection_limit(line)} 个，selected按取材顺序排列，不重复ID，每项说明相对取舍。'
+                '\n栏目规则：' + policy.stage_rules(line, 'selection') + '\n' + json.dumps(summaries, ensure_ascii=False), cancel, effort='low')
+            selected = choice['selected']
+            if len({x['id'] for x in selected}) != len(selected): raise ValueError('最终比较重复选择事件')
+            screen.write_json(path, choice)
+        chosen = {row['id']: (index+1, row['reason']) for index, row in enumerate(choice['selected'])}
+        for event in candidates:
+            value = dict(result[event['id']])
+            if event['id'] in chosen:
+                value['priority'], value['reason'] = chosen[event['id']]
+            else:
+                value.update(decision='deferred', priority=None, reason=value['reason'] + '；本轮全局比较后未纳入取材。')
+            result[event['id']] = value
+    return result
 
 
 def select(store, items_by_ref, rules, cancel):
@@ -230,6 +324,7 @@ def select(store, items_by_ref, rules, cancel):
     prompt_hash=policy.digest(selection_prompt([],line))
     if (store.value.get('selection_prompt_hash')==prompt_hash
             and all(any(r['stage']=='selection' for r in e['screening']['rounds']) for e in events)): return
+    store.phase('running', 'planning')
     inputs = [{'id':e['id'], 'items':[compact_item(items_by_ref[r]) for r in e['refs']],
         'hook':e['initial'][0].get('hook'), 'initial_reason':e['initial'][0]['reason']} for e in events]
     prompt=selection_prompt(inputs,line)
@@ -249,7 +344,9 @@ def select(store, items_by_ref, rules, cancel):
             candidate=json.loads(final.read_text(encoding='utf-8')).get('items',{})
             if set(candidate)=={e['id'] for e in events}: result=candidate
     if result is None:
-        result = call_model(store.root,'selection',selection_schema([e['id'] for e in events]),prompt,cancel,effort='medium')['items']
+        result = selection_chunks(store, events, inputs, items_by_ref, line, rules, cancel)
+    screen.write_json(cache,{'input_hash':basis,'items':result})
+    result=repair_selection(store.root,events,items_by_ref,result,line,cancel)
     screen.write_json(cache,{'input_hash':basis,'items':result})
     apply_selection(store,items_by_ref,result,line)
 
@@ -263,81 +360,9 @@ def compact_item(item):
 
 
 def preselect(batch_dir, event_items, items, rules, cancel, compare=True):
-    """Judge the two short-material stages in one request, preserving both decisions."""
-    root=Path(batch_dir)/'review'
-    chunks=list(policy.chunks(event_items, policy.config()['initial_chunk_chars']))
-    if len(chunks)>1:
-        return preselect_chunks(batch_dir, chunks, items, rules, cancel, compare=compare)
-    line=getattr(cancel,'line',None)
-    first=screen.schema_for(event_items,(line or {}).get('mode','hotspot'))
-    second=selection_schema([e['ref'] for e in event_items])
-    first=json.loads(json.dumps(first).replace('#/$defs/event','#/$defs/initial'))
-    second=json.loads(json.dumps(second).replace('#/$defs/event','#/$defs/selection'))
-    second_items=second['properties']['items']
-    second_items['properties']={ref:{'anyOf':[value,{'type':'null'}]} for ref,value in second_items['properties'].items()}
-    schema=obj({'initial':first['properties']['items'],'selection':second_items})
-    schema['$defs']={'initial':first['$defs']['event'],'selection':second['$defs']['event']}
-    prompt=(screen.initial_prompt(event_items,rules,line)
-        +'\n先对全部事件完成initial初筛。随后只比较initial中advance的事件，按下列二筛规则填写selection。'
-        '未通过初筛的selection填null；晋级事件不得填null。两轮使用上面同一份短材料，保留各自独立的决定和理由，不搜索正文。\n'
-        +selection_prompt([],line).rsplit('\n事件：',1)[0])
-    wrapped=model_prompt('preselection',prompt,cancel)
-    basis=policy.digest({'prompt':wrapped,'schema':schema})
-    cache=root/'preselection.json'
-    saved=json.loads(cache.read_text(encoding='utf-8')) if cache.exists() else {}
-    result=saved.get('result') if saved.get('input_hash')==basis else None
-    if result is None:
-        for final in sorted((root/'calls').glob('preselection-*/final.json')):
-            folder=final.parent
-            if not (folder/'status.json').exists(): continue
-            status=json.loads((folder/'status.json').read_text(encoding='utf-8'))
-            if (status.get('status')=='completed' and (folder/'prompt.txt').read_text(encoding='utf-8')==wrapped
-                    and json.loads((folder/'schema.json').read_text(encoding='utf-8'))==schema):
-                result=json.loads(final.read_text(encoding='utf-8')); break
-    if result is None and not compare:
-        # Existing candidates must join the same global comparison. Do only the
-        # missing initial judgments here, not a second round on a partial pool.
-        return preselect_chunks(batch_dir,chunks,items,rules,cancel,compare=False)
-    if result is None: result=call_model(root,'preselection',schema,prompt,cancel,effort='medium')
-    old_advanced=set(saved['selection_initial_ids']) if saved.get('input_hash')==basis and 'selection_initial_ids' in saved else {
-        ref for ref,value in result['initial'].items() if value['decision']=='advance'}
-    screen.write_json(cache,{'input_hash':basis,'result':result,'selection_initial_ids':sorted(old_advanced)})
-    rows=[]
-    for event in event_items:
-        value=result['initial'][event['ref']]
-        try:
-            row=screen.initial_row(event,value)
-        except ValueError as exc:
-            mode=(line or {}).get('mode','hotspot')
-            corrected=call_model(root,'initial-evidence-repair',screen.schema_for([event],mode),
-                screen.initial_prompt([event],rules,line)+'\n修正上次结果的依据错误。只允许本事件提供的原始ref和逐字引文。'
-                +'重新核对判断，不删引文掩盖不足。错误：'+str(exc)+'\n上次结果：'
-                +json.dumps(value,ensure_ascii=False),cancel)['items'][event['ref']]
-            row=screen.initial_row(event,corrected)
-            result['initial'][event['ref']]=corrected
-            screen.write_json(cache,{'input_hash':basis,'result':result,'selection_initial_ids':sorted(old_advanced)})
-        rows.append(row)
-    advanced={r['ref']:r for r in rows if policy.advanced(r)}
-    if compare and old_advanced==set(advanced) and {ref for ref,value in result['selection'].items() if value is not None}!=set(advanced):
-        raise ValueError('合并调用的二筛范围与初筛晋级范围不一致')
-    store=Store(root,len(advanced))
-    store.value.update(policy_version=policy.config()['version'],policy_hash=policy.policy_hash(),event_level_initial=True)
-    store.value['events']=[e for e in store.value['events'] if e['id'] in advanced]
-    if {e['id'] for e in store.value['events']}!=set(advanced):raise ValueError('事件映射没有覆盖预筛结果')
-    for event in store.value['events']:
-        row=advanced[event['id']]
-        event.update(initial=[row],title=row['hook'])
-        event.setdefault('stage_hashes',{})['initial']=policy.stage_hash(line,'initial')
-        event['screening']['rounds']=list(row['screening']['rounds'])
-    if compare:
-        if old_advanced==set(advanced):
-            apply_selection(store,{i['ref']:i for i in items},{ref:result['selection'][ref] for ref in advanced},line)
-        else:
-            store.value.pop('selection_prompt_hash',None)
-            if advanced: select(store,{i['ref']:i for i in items},rules,cancel)
-    store.save()
-    screen.write_json(Path(batch_dir)/'result.json',rows)
-    return rows
+    chunks = [chunk for offset in range(0, len(event_items), 10)
+              for chunk in policy.chunks(event_items[offset:offset+10], 14000)]
+    return preselect_chunks(batch_dir, chunks, items, rules, cancel, compare=compare)
 
 
 def preselect_chunks(batch_dir, chunks, items, rules, cancel, compare=True):
@@ -348,6 +373,7 @@ def preselect_chunks(batch_dir, chunks, items, rules, cancel, compare=True):
     line=getattr(cancel,'line',None)
     mode=(line or {}).get('mode','hotspot')
     def initial(chunk):
+        policy.remaining(cancel)
         key=policy.digest({'events':chunk,'rules':rules,'policy':policy.policy_hash(),'stage':policy.stage_hash(line,'initial')})
         path=folder/(key+'.json')
         if path.exists():
@@ -368,6 +394,9 @@ def preselect_chunks(batch_dir, chunks, items, rules, cancel, compare=True):
                 result[event['ref']]=corrected
                 screen.write_json(path,result)
             rows.append(row)
+        checkpoint=root/'initial-progress'/(key+'.json')
+        checkpoint.parent.mkdir(exist_ok=True)
+        screen.write_json(checkpoint,rows)
         return rows
     with ThreadPoolExecutor(max_workers=MODEL_CONCURRENCY) as executor:
         rows=[row for result in executor.map(initial,chunks) for row in result]
@@ -383,7 +412,6 @@ def preselect_chunks(batch_dir, chunks, items, rules, cancel, compare=True):
         event['screening']['rounds']=list(row['screening']['rounds'])
     store.save()
     if advanced and compare: select(store,{i['ref']:i for i in items},rules,cancel)
-    screen.write_json(Path(batch_dir)/'result.json',rows)
     return rows
 
 
@@ -889,8 +917,12 @@ def run(batch_dir, items, initial_rows, rules, cancel):
                          key=lambda e: e['plan']['priority'])
         prepare_reader=getattr(cancel,'prepare_original_reader',None)
         browser_hosts={'www.toutiao.com','www.baidu.com','s.weibo.com','www.zhihu.com'}
+        browser_error = None
         if prepare_reader and any(urlsplit(byref[ref].get('entry_url') or byref[ref].get('url') or '').hostname in browser_hosts
-                for e in pending for ref in sources_to_refresh(root,e,byref)): prepare_reader()
+                for e in pending for ref in sources_to_refresh(root,e,byref)):
+            try: prepare_reader()
+            except (RuntimeError, OSError) as exc:
+                browser_error = '浏览器取材不可用：' + str(exc)[:300]
 
         def read_batch(batch):
             for event in batch:
@@ -902,8 +934,13 @@ def run(batch_dir, items, initial_rows, rules, cancel):
                     refresh_refs = sources_to_refresh(root, event, byref)
                     if refresh_refs:
                         for ref in refresh_refs:
+                            store.update(event, reading_ref=ref)
                             reader = getattr(cancel,'original_reader',None) or materials.resolve_original
-                            row, material = reader(dict(byref[ref], verification_question=(event.get('plan') or {}).get('question')), cancel)
+                            input_row = dict(byref[ref], verification_question=(event.get('plan') or {}).get('question'))
+                            if browser_error and urlsplit(input_row.get('entry_url') or input_row.get('url') or '').hostname in browser_hosts:
+                                row, material = dict(input_row, resolution_attempt={'status':'failed','error':browser_error,'transport_error':True}), []
+                            else:
+                                row, material = reader(input_row, cancel)
                             with store.lock:
                                 byref[ref].update(row)
                                 screen.write_json(Path(batch_dir)/'items.json', items)
@@ -915,13 +952,16 @@ def run(batch_dir, items, initial_rows, rules, cancel):
                                 store.save()
                             attempt = row.get('resolution_attempt') or {}
                             if attempt.get('transport_error'):
-                                store.update(event, originals_checked=False)
-                                raise RuntimeError(attempt.get('error') or '原帖读取中断')
-                        event['originals_checked'] = True
+                                event.setdefault('source_errors', {})[ref] = attempt.get('error') or '原帖读取中断'
+                            else:
+                                event.setdefault('source_errors', {}).pop(ref, None)
+                        event['originals_checked'] = not bool(event.get('source_errors'))
                         event['reader_version'] = policy.config()['reader_version']
                         original = next((m for m in event['materials'] if m.get('role')=='original' and m['status']=='read'), None)
                         event['primary_original_id'] = original['material_id'] if original else None
                         store.save()
+                        if event.get('source_errors') and not any(usable_material(root,m) for m in event['materials']):
+                            raise RuntimeError('；'.join(dict.fromkeys(event['source_errors'].values())))
                     if (event.get('assessment') or {}).get('basis_hash') != verification_basis(root, event, byref):
                         invalidate_assessment(event)
                     if event.get('assessment'): event['stage'] = 'judged'
@@ -930,6 +970,7 @@ def run(batch_dir, items, initial_rows, rules, cancel):
                     store.update(event, stage='deferred', error=str(exc)[:500], source_read_failed=True, originals_checked=False)
                     policy.remaining(cancel)
                 finally:
+                    event.pop('reading_ref', None)
                     store.finish_reading(event)
             ready = [e for e in batch if not e.get('assessment') and not e.get('source_read_failed')]
             # Use only the collected entries and the posts explicitly linked from them.

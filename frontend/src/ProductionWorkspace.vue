@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { nextTick, computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter, onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 import { api, isPrototype } from './api'
@@ -8,6 +8,7 @@ import { creation } from './workflow'
 import { sourceLinks, hotlistLinks } from './sources'
 import RichEditor from './RichEditor.vue'
 import ArticleBody from './ArticleBody.vue'
+import ReviewReport from './ReviewReport.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -16,6 +17,9 @@ const error = ref('')
 const notice = ref('')
 const pending = ref(false)
 const loading = ref(true)
+const localOnly = ref(true)
+const creationGroups=computed(()=>creation.groups?.length?creation.groups:creation.events.length?[{lineId:creation.lineId,lineName:'已选内容',batchId:creation.batchId,format:creation.format,events:creation.events}]:[])
+const creationCount=computed(()=>creationGroups.value.reduce((n,g)=>n+g.events.length,0))
 const targets = computed({ get: () => creation.targets || [], set: value => { creation.targets=value } })
 const selectedJobs = ref([])
 const filter = ref('all')
@@ -30,6 +34,23 @@ const title = ref('')
 const titleRevision = ref(null)
 const bodyOpen = ref(false)
 const body = ref('')
+const reviewOpen = ref(false), editorPanel = ref(''), savedAt = ref('')
+const previewHtml=ref(''),previewError=ref(''),previewLoading=ref(false)
+let previewTimer,previewRequest=0
+watch(()=>[editorPanel.value,body.value],()=>{
+ clearTimeout(previewTimer);const token=++previewRequest
+ if(editorPanel.value!=='preview')return
+ previewLoading.value=true
+ previewTimer=setTimeout(async()=>{
+  try{const j=currentJob.value;const r=await api('/api/production/preview',{platform:j.target.platform,theme:j.draft.theme||'simple',body_html:body.value,presentation_mode:j.draft.presentation_mode});if(token===previewRequest){previewHtml.value=r.html;previewError.value=''}}
+  catch(e){if(token===previewRequest)previewError.value=e.message}
+  finally{if(token===previewRequest)previewLoading.value=false}
+ },250)
+})
+async function toggleEditorPanel(panel){
+ editorPanel.value=editorPanel.value===panel?'':panel
+ if(panel==='sources'&&!originals.value.length)try{originals.value=(await api(`/api/production/jobs/${currentJob.value.id}/sources`)).sources;sourceError.value=''}catch(e){sourceError.value=e.message}
+}
 const bodyRevision = ref(null)
 const bodyOriginal = ref('')
 const titleOriginal = ref('')
@@ -45,7 +66,8 @@ const sourceError = ref('')
 const currentJob = computed(() => data.value.jobs.find(j => j.id === route.params.id))
 const currentWork = computed(()=>(data.value.works||[]).find(w=>w.job_ids.includes(currentJob.value?.id)))
 const workJobs = work => data.value.jobs.filter(j=>work?.job_ids.includes(j.id))
-const visibleWorks = computed(()=>(data.value.works||[]).filter(w=>(!columnFilter.value||w.line_id===columnFilter.value)&&(filter.value==='all'||(filter.value==='saved'?workJobs(w).every(j=>['saved','draft_verified'].includes(j.platform_save?.status)):workJobs(w).some(j=>visibleJobs.value.includes(j))))))
+const savedJob = j => j.target.platform==='local' ? j.stage==='ready_review'&&j.editorial_approved : ['saved','draft_verified'].includes(j.platform_save?.status)
+const visibleWorks = computed(()=>(data.value.works||[]).filter(w=>(!columnFilter.value||w.line_id===columnFilter.value)&&(filter.value==='all'||(filter.value==='saved'?workJobs(w).every(savedJob):workJobs(w).some(j=>visibleJobs.value.includes(j))))))
 const articleSources = computed(() => sourceLinks(currentJob.value?.draft?.sources || currentJob.value?.packet?.materials))
 const hotlistSources = computed(() => hotlistLinks(currentJob.value?.packet?.items))
 const original = computed(() => originals.value[originalIndex.value])
@@ -70,24 +92,25 @@ const selected = computed(() => data.value.jobs.filter(j => selectedJobs.value.i
 const creating = computed(() => route.path === '/drafts/new')
 const accountsPage = computed(() => route.path === '/accounts')
 const visibleJobs = computed(() => data.value.jobs.filter(j => filter.value === 'all' ||
-  (filter.value === 'attention' ? !!j.error || ['failed','outcome_unknown','needs_attention','blocked','needs_login'].includes(j.status) :
-  filter.value === 'saved' ? ['saved','draft_verified'].includes(j.platform_save?.status) : ['queued','researching','writing','editing','checking','formatting'].includes(j.stage))))
+  (filter.value === 'attention' ? !!j.error || (j.stage==='ready_review'&&!j.editorial_approved) || ['failed','outcome_unknown','needs_attention','blocked','needs_login'].includes(j.status) :
+  filter.value === 'saved' ? savedJob(j) : j.status!=='failed'&&['queued','researching','writing','editing','checking','formatting'].includes(j.stage))))
 let timer
 let disposed = false
-const stageLabels = { queued: '排队中', researching: '补充资料', writing: '写作中', editing: '编辑中', checking: '核验中', formatting: '排版中', ready_review: '待审稿', syncing: '同步草稿中', resuming: '继续同步中', remote_verified: '平台草稿已核对', publishing: '提交中', submitted: '已提交', reviewing: '平台审核中', published: '已发布', needs_login: '需要登录', needs_attention: '需要处理', failed: '失败', cancelled: '已取消', outcome_unknown: '结果未知，待核验', blocked: '受阻' }
-const platformLabels = { wechat: '公众号', toutiao: '今日头条' }
+const stageLabels = { queued: '排队中', researching: '补充资料', writing: '写作中', editing: '编辑中', checking: '审稿中', formatting: '排版中', ready_review: '待审稿', syncing: '同步草稿中', resuming: '继续同步中', remote_verified: '平台草稿已核对', publishing: '提交中', submitted: '已提交', reviewing: '平台审核中', published: '已发布', needs_login: '需要登录', needs_attention: '需要处理', failed: '失败', cancelled: '已取消', outcome_unknown: '结果未知，待核验', blocked: '受阻' }
+const platformLabels = { local: '本地稿', wechat: '公众号', toutiao: '今日头条' }
 const accountStatuses = { needs_login: '需要登录', starting: '正在连接', connected: '已核验', needs_check: '待核验', needs_attention: '需要处理', failed: '连接失败' }
 const capabilityLabels = { connect: '连接账号', save_draft: '同步草稿', inspect_draft: '回读草稿', publish: '发布', verify: '核验结果' }
 const accountModes = { browser: '现有浏览器专用窗口', profile: '独立浏览器资料' }
 function status(job) {
   if (['saved','draft_verified'].includes(job.platform_save?.status) && job.editorial_approved !== true) return '草稿已存，待重审'
+  if (job.stage === 'ready_review' && job.target.platform==='local' && job.editorial_approved) return '本地稿已完成'
   if (job.stage === 'ready_review') return job.error ? '待处理' : job.editorial_approved ? '待存草稿' : '待审稿'
   const s = job.status === 'failed' || job.status === 'outcome_unknown' || job.status === 'needs_login' || job.status === 'blocked' ? job.status : job.stage || job.status
   return stageLabels[s] || `未知状态（${s || '未提供'}）`
 }
 function platform(value) { return platformLabels[value] || value || '未知平台' }
 function jobAccount(job) { return data.value.accounts.find(a => a.id === job.target?.account_id) }
-function accountName(job) { return jobAccount(job)?.identity?.name || jobAccount(job)?.display_name || job.packet?.account?.display_name || job.target?.account_id || '未知账号' }
+function accountName(job) { if(job.target.platform==='local')return '保存在工作台'; return jobAccount(job)?.identity?.name || jobAccount(job)?.display_name || job.packet?.account?.display_name || job.target?.account_id || '未知账号' }
 function verification(account, feature) { return ({ verified: '已实机验证', not_verified: '代码已接入，未实机验证', not_implemented: '未接入' })[account.verification?.[feature]] || '验收状态未提供' }
 function hasCapability(job, feature) { return jobAccount(job)?.capabilities?.[feature] === true }
 function capabilityReason(job, feature) { const account = jobAccount(job); return account?.capabilities?.[feature] === true ? '' : account?.capability_reason || (account ? '该账号未提供此操作的可用能力。' : '未找到目标账号，无法确认平台能力。') }
@@ -105,12 +128,13 @@ function coverUrl(url) {
   return /^\/media\/[A-Za-z0-9_-]+\.(?:png|jpg|jpeg)$/.test(url) ? `/api/production${url}` : null
 }
 function printable(value) { return typeof value === 'string' ? value : JSON.stringify(value, null, 2) }
-function canEdit(job) { return !!job && !job.pending_operation && !job.operation_uncertain && (['ready_review', 'remote_verified', 'needs_attention'].includes(job.stage) || (job.stage === 'failed' && job.external_operation === 'publish' && job.remote?.status === 'failed')) && job.status !== 'outcome_unknown' && !['submitted', 'reviewing', 'published', 'outcome_unknown'].includes(job.remote?.status) }
+function canEdit(job) { return !!job && !['queued','running'].includes(job.status) && !job.pending_operation && !job.operation_uncertain && (['ready_review', 'remote_verified', 'needs_attention'].includes(job.stage) || (job.status==='failed' && job.local_operation==='review' && job.draft?.body_html) || (job.stage === 'failed' && job.external_operation === 'publish' && job.remote?.status === 'failed')) && job.status !== 'outcome_unknown' && !['submitted', 'reviewing', 'published', 'outcome_unknown'].includes(job.remote?.status) }
 function canSync(job) { return !(job.stage === 'remote_verified' && job.content_hash === job.remote?.verified_hash) && job.editorial_approved === true && !titleLimitError(job) && !statementError(job) && hasCapability(job, 'save_draft') && canEdit(job) && ['ready_review', 'remote_verified', 'needs_attention'].includes(job.stage) && !['unknown', 'outcome_unknown', 'submitted', 'reviewing', 'published'].includes(job.remote?.status) && !(job.stage === 'needs_attention' && job.remote?.status === 'saved') }
 function canPublish(job) { return job.editorial_approved === true && !job.remote?.publish_blockers?.length && !job.pending_operation && !job.operation_uncertain && hasCapability(job, 'publish') && hasCapability(job, 'inspect_draft') && job.stage === 'remote_verified' && !!job.content_hash && job.content_hash === job.remote?.verified_hash && !!job.remote?.verified_identity && !!job.remote?.fingerprint && !!job.remote?.draft_id }
 function verifyCapability(job) { return job.external_operation !== 'publish' && job.remote?.draft_id && ['saved', 'draft_verified'].includes(job.remote?.status) ? 'inspect_draft' : 'verify' }
 function canVerify(job) { return !job.pending_operation && (!!job.remote || job.status === 'outcome_unknown' || job.operation_uncertain) && hasCapability(job, verifyCapability(job)) }
 function unavailableReason(job) {
+  if(job.target.platform==='local')return ''
   if (canEdit(job) && titleLimitError(job)) return titleLimitError(job)
   if (canEdit(job) && statementError(job)) return statementError(job)
   if (job.stage === 'remote_verified' && !hasCapability(job, 'publish')) return capabilityReason(job, 'publish')
@@ -169,8 +193,8 @@ async function closeEditor(){if(await discard()){bodyOpen.value=false;notice.val
 onBeforeRouteLeave(discard)
 onBeforeRouteUpdate(discard)
 onMounted(()=>{window.addEventListener('beforeunload',beforeUnload);poll()})
-onBeforeUnmount(() => { disposed = true; window.clearTimeout(timer);window.removeEventListener('beforeunload',beforeUnload) })
-watch(() => route.fullPath, () => { notice.value = ''; titleOpen.value = false; bodyOpen.value = false; entriesOpen.value = false; selectedJobs.value = []; comparing.value = false; originals.value = []; originalIndex.value = 0 })
+onBeforeUnmount(() => { disposed = true; window.clearTimeout(timer);clearTimeout(previewTimer);previewRequest++;window.removeEventListener('beforeunload',beforeUnload) })
+watch(() => route.fullPath, () => { notice.value = ''; titleOpen.value = false; bodyOpen.value = false; reviewOpen.value=false; entriesOpen.value = false; selectedJobs.value = []; comparing.value = false; originals.value = []; originalIndex.value = 0 })
 function report(result) {
   const rows = result.results || []
   const failures = rows.filter(row => !row.ok)
@@ -180,18 +204,25 @@ function report(result) {
 async function createJobs() {
   pending.value = true; notice.value = ''
   try {
-    const result = await request('/api/production/jobs', { batch_id: creation.batchId, event_ids: creation.events.map(e => e.id), expected_versions: Object.fromEntries(creation.events.map(e => [e.id, e.version])),
-      targets: data.value.accounts.filter(a => targets.value.includes(a.id)).map(a => ({ platform: a.platform, account_id: a.id })) })
-    if (report(result)) {
-      creation.events = []
-      const jobs=result.results.filter(r => r.ok)
-      router.replace(jobs.length === 1 ? `/drafts/${jobs[0].job_id}` : '/drafts')
+    const result = await request('/api/production/batch', {
+      selections: creationGroups.value.filter(g=>g.events.length).map(g=>({batch_id:g.batchId,event_ids:g.events.map(e=>e.id),expected_versions:Object.fromEntries(g.events.map(e=>[e.id,e.version]))})),
+      targets:localOnly.value?[]:data.value.accounts.filter(a=>targets.value.includes(a.id)).map(a=>({platform:a.platform,account_id:a.id}))
+    })
+    const ok=report(result)
+    const accepted=result.results.filter(r=>r.ok)
+    for(const g of creationGroups.value){
+      if(g.format==='digest') {if(accepted.some(r=>r.batch_id===g.batchId)&&!result.results.some(r=>r.batch_id===g.batchId&&!r.ok))g.events=[]}
+      else g.events=g.events.filter(e=>!accepted.some(r=>r.batch_id===g.batchId&&r.event_id===e.id)||result.results.some(r=>r.batch_id===g.batchId&&r.event_id===e.id&&!r.ok))
+      if(creation.selections[g.lineId])creation.selections[g.lineId].events=g.events.map(e=>({...e}))
     }
+    if (ok) {creation.groups=[];creation.events=[];pending.value=false;await router.replace('/drafts')}
+
     await refresh()
   } catch (e) { notice.value = e.message } finally { pending.value = false }
 }
 async function runAction(action, jobs) {
   if (!jobs.length) return
+  if(action==='review'){reviewOpen.value=true;return}
   pending.value = true; notice.value = ''
   try {
     const payload = { job_ids: jobs.map(j => j.id), action, expected_revisions: Object.fromEntries(jobs.map(j => [j.id, j.revision])) }
@@ -217,12 +248,13 @@ async function saveEntries() {
     entriesOpen.value=false; await refresh()
   } catch(e) { notice.value=e.message } finally { pending.value=false }
 }
-function openBody() {body.value=currentJob.value.draft.body_html;title.value=currentJob.value.draft.title;bodyOriginal.value=body.value;titleOriginal.value=title.value;bodyRevision.value=currentJob.value.revision;notice.value='';bodyOpen.value=true}
-async function saveBody() {
+async function openBody(issue='') {body.value=currentJob.value.draft.body_html;title.value=currentJob.value.draft.title;bodyOriginal.value=body.value;titleOriginal.value=title.value;bodyRevision.value=currentJob.value.revision;notice.value='';bodyOpen.value=true;editorPanel.value='';savedAt.value='';await nextTick();if(typeof issue==='string'&&issue)richEditor.value?.focusText(issue)}
+async function saveBody(reviewAfter=false) {
+  if(pending.value||!dirty.value||!body.value.trim()||!title.value.trim())return
   pending.value=true; notice.value=''
   try {
     await request(`/api/production/jobs/${currentJob.value.id}`, { expected_revision:bodyRevision.value, changes:{ body_html:body.value,title:title.value } }, 'PATCH')
-    bodyOpen.value=false; await refresh()
+    await refresh();body.value=currentJob.value.draft.body_html;title.value=currentJob.value.draft.title;bodyOriginal.value=body.value;titleOriginal.value=title.value;bodyRevision.value=currentJob.value.revision;savedAt.value=new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});notice.value='';if(reviewAfter)reviewOpen.value=true
   } catch(e) { notice.value=e.message } finally { pending.value=false }
 }
 async function uploadBodyImage(event) {
@@ -283,31 +315,45 @@ async function connect(account) {
       <div v-if="!loading&&!data.accounts.length" class="empty-state"><h2>暂无账号</h2><el-button @click="accountOpen=true">添加账号</el-button></div>
     </template>
     <template v-else-if="creating">
-      <header class="page-heading"><div class="actions"><RouterLink class="back-link" aria-label="返回选题" :to="{path:'/topics',query:{column:creation.lineId}}"><Icon name="back"/></RouterLink><h1>{{creation.format==='digest'?'制作集合稿':'制作单篇'}}</h1></div></header>
-      <div class="creation-layout"><section class="surface creation-topics"><div class="section-heading"><h2>已选内容</h2><span class="muted">{{creation.events.length}} 条</span></div><ol class="entry-list"><li v-for="(event,index) in creation.events" :key="event.id"><span>{{event.title}}</span><div class="actions"><template v-if="creation.format==='digest'"><el-button text :disabled="index===0||pending" :aria-label="`上移 ${event.title}`" @click="moveEntry(creation.events,index,-1)">上移</el-button><el-button text :disabled="index===creation.events.length-1||pending" :aria-label="`下移 ${event.title}`" @click="moveEntry(creation.events,index,1)">下移</el-button></template><el-button text :disabled="pending" :aria-label="`移出 ${event.title}`" @click="creation.events.splice(index,1)">移出</el-button></div></li></ol><RouterLink v-if="!creation.events.length" :to="{path:'/topics',query:{column:creation.lineId}}">选择选题</RouterLink></section><aside class="surface creation-targets"><h2>目标账号</h2><el-checkbox-group v-model="targets" class="target-list"><el-checkbox v-for="account in data.accounts" :key="account.id" :value="account.id">{{platform(account.platform)}} · {{account.identity?.name||account.display_name}}</el-checkbox></el-checkbox-group><RouterLink v-if="!loading&&!data.accounts.length" to="/accounts">添加账号</RouterLink><el-button class="wide-button" type="primary" :loading="pending" :disabled="!targets.length||!creation.events.length" @click="createJobs">开始制作</el-button></aside></div>
+      <header class="page-heading"><div class="actions"><RouterLink class="back-link" to="/topics"><Icon name="back"/>返回选题</RouterLink><h1>加入制作队列</h1></div></header>
+      <div class="creation-layout"><section class="surface creation-topics">
+        <section v-for="group in creationGroups" :key="`${group.lineId}:${group.batchId}`" class="creation-group"><div class="section-heading"><h2>{{group.lineName}}</h2><span class="muted">{{group.format==='digest'?'合为一篇集合稿':'每条制作一篇'}} · {{group.events.length}} 条</span></div>
+          <ol class="entry-list"><li v-for="(event,index) in group.events" :key="event.id"><span>{{event.title}}</span><div class="actions"><template v-if="group.format==='digest'"><el-button text :disabled="index===0||pending" @click="moveEntry(group.events,index,-1)">上移</el-button><el-button text :disabled="index===group.events.length-1||pending" @click="moveEntry(group.events,index,1)">下移</el-button></template><el-button text :disabled="pending" @click="group.events.splice(index,1)">移出</el-button></div></li></ol>
+        </section><RouterLink v-if="!creationCount" to="/topics">选择选题</RouterLink>
+      </section><aside class="surface creation-targets"><h2>制作目标</h2><el-checkbox v-model="localOnly">仅制作本地稿</el-checkbox><template v-if="!localOnly"><el-checkbox-group v-model="targets" class="target-list"><el-checkbox v-for="account in data.accounts" :key="account.id" :value="account.id">{{platform(account.platform)}} · {{account.identity?.name||account.display_name}}</el-checkbox></el-checkbox-group><RouterLink v-if="!loading&&!data.accounts.length" to="/accounts">添加平台账号</RouterLink></template><p class="muted">制作完成保存在工作台，平台存稿另行操作。</p><el-button class="wide-button" type="primary" :loading="pending" :disabled="(!localOnly&&!targets.length)||!creationCount" @click="createJobs">开始制作</el-button></aside></div>
     </template>
     <template v-else-if="currentJob">
       <template v-if="bodyOpen">
-        <header class="page-heading editor-heading"><div class="actions"><h1>编辑稿件</h1><span class="status-pill neutral">{{platform(currentJob.target.platform)}}</span><span v-if="dirty" class="muted">未保存</span></div><div class="actions"><el-button :disabled="pending" @click="closeEditor">取消</el-button><el-button type="primary" :loading="pending" :disabled="!body.trim()||!title.trim()" @click="saveBody">保存修改</el-button></div></header>
-        <section class="editor-sheet"><label class="sr-only" for="article-title">文章标题</label><textarea id="article-title" v-model="title" class="editor-title" aria-label="文章标题" rows="2" :disabled="pending"/><RichEditor ref="richEditor" v-model="body" :disabled="pending" :platform="currentJob.target.platform" :presentation-mode="currentJob.draft.presentation_mode" @image="uploadBodyImage" /></section>
+       <div class="editing-workspace" @keydown.ctrl.s.prevent="saveBody()" @keydown.meta.s.prevent="saveBody()">
+        <header class="page-heading editor-heading"><div class="actions"><el-button text :disabled="pending" @click="closeEditor"><Icon name="back"/>返回稿件</el-button><span class="editor-save-state" aria-live="polite">{{pending?'保存中…':dirty?'未保存':savedAt?`已保存 ${savedAt}`:'已保存'}}</span><el-button v-if="!dirty&&!currentJob.editorial_approved" text @click="reviewOpen=true">待审稿 · 查看</el-button></div><div class="actions"><el-button :class="{ 'is-active':editorPanel==='sources' }" @click="toggleEditorPanel('sources')">材料对照</el-button><el-button :class="{ 'is-active':editorPanel==='preview' }" @click="toggleEditorPanel('preview')">预览</el-button><el-button type="primary" :loading="pending" :disabled="!dirty||!body.trim()||!title.trim()" @click="saveBody()">保存修改</el-button></div></header>
+        <div class="editing-layout" :class="{'with-panel':editorPanel}">
+         <section class="editor-sheet"><RichEditor ref="richEditor" v-model="body" :disabled="pending" :platform="currentJob.target.platform" :presentation-mode="currentJob.draft.presentation_mode" @image="uploadBodyImage"><template #title><div class="editor-title-area"><el-input id="article-title" v-model="title" type="textarea" :autosize="{minRows:1,maxRows:6}" aria-label="文章标题" placeholder="输入文章标题" :disabled="pending" resize="none"/></div></template></RichEditor></section>
+         <aside v-if="editorPanel" class="editor-side-panel surface">
+          <div class="section-heading"><h2>{{editorPanel==='sources'?'材料对照':'成稿预览'}}</h2><el-button text @click="editorPanel=''">收起</el-button></div>
+          <template v-if="editorPanel==='sources'"><el-select v-if="originals.length>1" v-model="originalIndex" aria-label="选择对照材料"><el-option v-for="(source,index) in originals" :key="index" :value="index" :label="source.title"/></el-select><p v-if="sourceError" class="action-error">{{sourceError}}</p><h3>{{original?.title}}</h3><p v-for="(paragraph,index) in originalParagraphs" :key="index">{{paragraph}}</p><a v-if="original&&safeLink(original.url)" :href="safeLink(original.url)" target="_blank" rel="noopener noreferrer">查看原文 ↗</a></template>
+          <template v-else><p v-if="previewError" class="action-error">{{previewError}}</p><span v-if="previewLoading" class="muted">正在更新…</span><h3>{{title}}</h3><ArticleBody :html="previewHtml"/></template>
+         </aside>
+        </div>
+       </div>
       </template>
       <template v-else>
-        <header class="page-heading"><RouterLink to="/drafts" class="back-link"><Icon name="back"/>稿件</RouterLink><div class="actions"><el-button @click="compareOriginal">{{comparing?'收起材料':'材料'}}</el-button><el-dropdown trigger="click" @command="command=>command==='entries'?openEntries():runAction(command,[currentJob])"><el-button aria-label="稿件更多操作"><Icon name="more"/></el-button><template #dropdown><el-dropdown-menu><el-dropdown-item command="review" :disabled="!canEdit(currentJob)||pending">重新审稿</el-dropdown-item><el-dropdown-item v-if="currentJob.packet?.format==='digest'" command="entries" :disabled="!canEdit(currentJob)||pending">调整条目</el-dropdown-item><el-dropdown-item command="cancel" :disabled="!canCancel(currentJob)||pending" divided>取消稿件</el-dropdown-item></el-dropdown-menu></template></el-dropdown><el-button v-if="canEdit(currentJob)" type="primary" :disabled="pending" @click="openBody"><Icon name="edit"/>编辑稿件</el-button></div></header>
+        <header class="page-heading"><RouterLink to="/drafts" class="back-link"><Icon name="back"/>稿件</RouterLink><div class="actions"><el-button @click="compareOriginal">{{comparing?'收起材料':'材料'}}</el-button><el-button @click="reviewOpen=true">审稿报告</el-button><el-dropdown trigger="click" @command="command=>command==='entries'?openEntries():runAction(command,[currentJob])"><el-button aria-label="稿件更多操作"><Icon name="more"/></el-button><template #dropdown><el-dropdown-menu><el-dropdown-item v-if="currentJob.packet?.format==='digest'" command="entries" :disabled="!canEdit(currentJob)||pending">调整条目</el-dropdown-item><el-dropdown-item command="cancel" :disabled="!canCancel(currentJob)||pending" divided>取消稿件</el-dropdown-item></el-dropdown-menu></template></el-dropdown><el-button v-if="canEdit(currentJob)" type="primary" :disabled="pending" @click="openBody"><Icon name="edit"/>编辑稿件</el-button></div></header>
         <div class="work-layout" :class="{'is-comparing':comparing}">
           <aside v-if="comparing" class="original-read surface"><div class="section-heading"><h2>材料</h2><a v-if="original&&safeLink(original.url)" :href="safeLink(original.url)" target="_blank" rel="noopener noreferrer">原文 ↗</a></div><el-select v-if="originals.length>1" v-model="originalIndex" aria-label="选择报道"><el-option v-for="(source,index) in originals" :key="index" :value="index" :label="source.title"/></el-select><p v-if="sourceError" class="action-error">{{sourceError}}</p><h3 v-if="original">{{original.title}}</h3><p v-for="(paragraph,index) in originalParagraphs" :key="index">{{paragraph}}</p><div class="material-links"><a v-for="source in [...articleSources,...hotlistSources]" :key="source.url" :href="safeLink(source.url)" target="_blank" rel="noopener noreferrer">{{source.label||source.title}} ↗</a></div></aside>
           <article class="article-read surface"><div class="article-meta">{{currentWork?.line_name||currentJob.packet?.line?.name}}<span class="dot">·</span>{{platform(currentJob.target.platform)}}</div><h1>{{currentJob.draft?.title||currentJob.source_title}}</h1><ArticleBody :html="currentJob.draft?.body_html||currentJob.draft?.html||''"/></article>
-          <aside class="delivery-rail"><section class="surface delivery-panel"><h2>平台稿件</h2><div v-for="job in workJobs(currentWork)" :key="job.id" class="delivery-card" :class="{active:job.id===currentJob.id}"><RouterLink :to="`/drafts/${job.id}`" class="delivery-title"><span class="platform-mark small" :class="job.target.platform">{{job.target.platform==='wechat'?'微':'头'}}</span><strong>{{platform(job.target.platform)}}</strong><Icon v-if="job.id===currentJob.id" name="check" :size="16"/></RouterLink><p class="muted">{{accountName(job)}}</p><span class="status-pill" :class="job.stage==='remote_verified'?'success':job.error?'warning':'neutral'">{{status(job)}}</span><template v-if="job.id===currentJob.id"><p v-if="problem(job)" class="action-error" role="alert">{{problem(job)}}</p><details v-if="job.error && problem(job)!==job.error" class="error-details"><summary>错误详情</summary><p>{{job.error}}</p></details><div class="delivery-actions"><a v-if="draftLink(job)" :href="draftLink(job)" target="_blank" rel="noopener noreferrer">平台草稿 ↗</a><a v-else-if="job.remote?.draft_id" :href="job.target.platform==='wechat'?'https://mp.weixin.qq.com/':'https://mp.toutiao.com/'" target="_blank" rel="noopener noreferrer">平台后台 ↗</a><el-button v-if="primary(job)" size="small" :disabled="pending" @click="runAction(primary(job).action,[job])">{{primary(job).label}}</el-button></div><el-tooltip :content="publishReason(job)" :disabled="canPublish(job)"><span class="publish-action"><el-button :disabled="!canPublish(job)||pending" @click="openConfirmation([job])">发布</el-button></span></el-tooltip></template></div></section><section class="surface cover-panel"><h2>封面</h2><img v-if="coverUrl(currentJob.draft?.cover_url)" :src="coverUrl(currentJob.draft.cover_url)" alt="封面"/><span v-else class="muted">未设置</span><label v-if="canEdit(currentJob)" class="upload-button" :class="{disabled:pending}">更换封面<input type="file" accept="image/png,image/jpeg" :disabled="pending" @change="uploadCover"/></label><el-button v-if="canEdit(currentJob) && currentJob.draft?.cover_url" text :disabled="pending" @click="removeCover">移除封面</el-button></section></aside>
+          <aside class="delivery-rail"><section class="surface delivery-panel"><h2>稿件版本</h2><div v-for="job in workJobs(currentWork)" :key="job.id" class="delivery-card" :class="{active:job.id===currentJob.id}"><RouterLink :to="`/drafts/${job.id}`" class="delivery-title"><span class="platform-mark small" :class="job.target.platform">{{job.target.platform==='local'?'文':job.target.platform==='wechat'?'微':'头'}}</span><strong>{{platform(job.target.platform)}}</strong><Icon v-if="job.id===currentJob.id" name="check" :size="16"/></RouterLink><p class="muted">{{accountName(job)}}</p><span class="status-pill" :class="job.stage==='remote_verified'?'success':job.error?'warning':'neutral'">{{status(job)}}</span><template v-if="job.id===currentJob.id"><p v-if="problem(job)" class="action-error" role="alert">{{problem(job)}}</p><details v-if="job.error && problem(job)!==job.error" class="error-details"><summary>错误详情</summary><p>{{job.error}}</p></details><div class="delivery-actions"><a v-if="draftLink(job)" :href="draftLink(job)" target="_blank" rel="noopener noreferrer">平台草稿 ↗</a><a v-else-if="job.remote?.draft_id" :href="job.target.platform==='wechat'?'https://mp.weixin.qq.com/':'https://mp.toutiao.com/'" target="_blank" rel="noopener noreferrer">平台后台 ↗</a><el-button v-if="primary(job)" size="small" :disabled="pending" @click="runAction(primary(job).action,[job])">{{primary(job).label}}</el-button></div><el-tooltip v-if="job.target.platform!=='local'" :content="publishReason(job)" :disabled="canPublish(job)"><span class="publish-action"><el-button :disabled="!canPublish(job)||pending" @click="openConfirmation([job])">发布</el-button></span></el-tooltip></template></div></section><section class="surface cover-panel"><h2>封面</h2><img v-if="coverUrl(currentJob.draft?.cover_url)" :src="coverUrl(currentJob.draft.cover_url)" alt="封面"/><span v-else class="muted">未设置</span><label v-if="canEdit(currentJob)" class="upload-button" :class="{disabled:pending}">更换封面<input type="file" accept="image/png,image/jpeg" :disabled="pending" @change="uploadCover"/></label><el-button v-if="canEdit(currentJob) && currentJob.draft?.cover_url" text :disabled="pending" @click="removeCover">移除封面</el-button></section></aside>
         </div>
       </template>
     </template>
     <div v-else-if="route.params.id&&!loading" class="empty-state"><h2>稿件不存在</h2><RouterLink to="/drafts">返回稿件</RouterLink></div>
     <template v-else>
-      <header class="page-heading"><div class="actions"><h1>稿件</h1><el-select v-model="columnFilter" aria-label="稿件栏目" style="width:150px"><el-option label="全部栏目" value=""/><el-option v-for="column in workColumns" :key="column.id" :label="column.name" :value="column.id"/></el-select></div><el-button @click="router.push('/topics')">选择选题<Icon name="arrow"/></el-button></header>
-      <div class="filter-tabs"><button v-for="option in [{id:'all',name:'全部'},{id:'working',name:'制作中'},{id:'attention',name:'待处理'},{id:'saved',name:'已存草稿'}]" :key="option.id" :class="{active:filter===option.id}" @click="filter=option.id">{{option.name}}</button></div>
-      <div class="surface work-list"><article v-for="work in visibleWorks" :key="work.id" class="work-row"><span class="resource-icon"><Icon name="drafts"/></span><div class="work-summary"><RouterLink :to="`/drafts/${work.job_ids[0]}`" class="draft-title">{{work.title}}</RouterLink><div class="muted">{{work.line_name}}<span class="dot">·</span>{{work.format==='digest'?'集合稿':'单篇'}}</div></div><div class="work-platforms"><RouterLink v-for="job in workJobs(work)" :key="job.id" :to="`/drafts/${job.id}`"><span class="platform-mark tiny" :class="job.target.platform">{{job.target.platform==='wechat'?'微':'头'}}</span><span>{{platform(job.target.platform)}}</span><span class="status-dot" :class="job.stage==='remote_verified'?'success':job.error?'warning':'neutral'"></span><span class="muted">{{status(job)}}</span></RouterLink></div><RouterLink :to="`/drafts/${work.job_ids[0]}`" class="icon-button" :aria-label="`打开 ${work.title}`"><Icon name="arrow"/></RouterLink></article></div>
+      <header class="page-heading"><div class="actions"><h1>稿件</h1><el-select v-model="columnFilter" aria-label="稿件栏目" placeholder="全部栏目" style="width:150px"><el-option label="全部栏目" value=""/><el-option v-for="column in workColumns" :key="column.id" :label="column.name" :value="column.id"/></el-select></div><el-button @click="router.push('/topics')">选择选题<Icon name="arrow"/></el-button></header>
+      <div class="filter-tabs"><button v-for="option in [{id:'all',name:'全部'},{id:'working',name:'制作队列'},{id:'attention',name:'待处理'},{id:'saved',name:'已完成'}]" :key="option.id" :class="{active:filter===option.id}" @click="filter=option.id">{{option.name}}</button></div>
+      <div class="surface work-list"><article v-for="work in visibleWorks" :key="work.id" class="work-row"><span class="resource-icon"><Icon name="drafts"/></span><div class="work-summary"><RouterLink :to="`/drafts/${work.job_ids[0]}`" class="draft-title">{{work.title}}</RouterLink><div class="muted">{{work.line_name}}<span class="dot">·</span>{{work.format==='digest'?'集合稿':'单篇'}}</div></div><div class="work-platforms"><RouterLink v-for="job in workJobs(work)" :key="job.id" :to="`/drafts/${job.id}`"><span class="platform-mark tiny" :class="job.target.platform">{{job.target.platform==='local'?'文':job.target.platform==='wechat'?'微':'头'}}</span><span>{{platform(job.target.platform)}}</span><span class="status-dot" :class="job.stage==='remote_verified'?'success':job.error?'warning':'neutral'"></span><span class="muted">{{status(job)}}</span></RouterLink><div class="actions"><el-button v-for="job in workJobs(work).filter(canRetry)" :key="job.id" text :disabled="pending" @click="runAction('retry',[job])">重试 {{platform(job.target.platform)}}</el-button><el-button v-if="workJobs(work).some(j=>['queued','running'].includes(j.status)&&canCancel(j))" text :disabled="pending" @click="runAction('cancel',workJobs(work).filter(j=>['queued','running'].includes(j.status)&&canCancel(j)))">取消制作</el-button></div></div><RouterLink :to="`/drafts/${work.job_ids[0]}`" class="icon-button" :aria-label="`打开 ${work.title}`"><Icon name="arrow"/></RouterLink></article></div>
       <div v-if="!loading&&!visibleWorks.length" class="empty-state"><h2>暂无稿件</h2><el-button @click="router.push('/topics')">选择选题</el-button></div>
     </template>
   </section>
+  <ReviewReport v-if="currentJob" v-model="reviewOpen" :job="currentJob" :editable="canEdit(currentJob)" @updated="refresh" @edit="openBody"/>
   <el-dialog v-model="entriesOpen" title="调整集合条目" width="620px" :close-on-click-modal="false"><ol class="entry-list"><li v-for="(entry,index) in entries" :key="entry.id"><span>{{entry.title}}</span><div class="actions"><el-button text :disabled="index===0||pending" @click="moveEntry(entries,index,-1)">上移</el-button><el-button text :disabled="index===entries.length-1||pending" @click="moveEntry(entries,index,1)">下移</el-button><el-button text :disabled="pending" @click="entries.splice(index,1)">移出</el-button></div></li></ol><p v-if="notice" class="action-error">{{notice}}</p><template #footer><el-button :disabled="pending" @click="entriesOpen=false">取消修改</el-button><el-button type="primary" :loading="pending" @click="saveEntries">{{entries.length?'保存并重新组稿':'取消这份稿件'}}</el-button></template></el-dialog>
   <el-dialog v-model="confirmOpen" title="确认发布" width="560px"><div v-for="job in confirmationJobs" :key="job.id" class="publish-row"><strong>{{job.draft.title}}</strong><p>{{platform(job.target.platform)}} · {{accountName(job)}}</p><a v-if="draftLink(job)" :href="draftLink(job)" target="_blank" rel="noopener noreferrer">平台草稿 ↗</a></div><template #footer><el-button @click="confirmOpen=false">取消</el-button><el-button type="primary" :loading="pending" @click="runAction('confirm_publish',confirmationJobs)">发布 {{confirmationJobs.length}} 篇</el-button></template></el-dialog>
   <el-dialog v-model="accountOpen" title="添加账号" width="440px"><el-form label-position="top" @submit.prevent="addAccount"><el-form-item label="平台"><el-select v-model="accountForm.platform" aria-label="平台"><el-option label="公众号" value="wechat"/><el-option label="今日头条" value="toutiao"/></el-select></el-form-item><el-form-item label="账号名称"><el-input v-model="accountForm.display_name" aria-label="账号名称"/></el-form-item></el-form><p v-if="notice" class="action-error">{{notice}}</p><template #footer><el-button @click="accountOpen=false">取消</el-button><el-button type="primary" :loading="pending" :disabled="!accountForm.display_name.trim()" @click="addAccount">添加</el-button></template></el-dialog>

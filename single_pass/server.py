@@ -402,6 +402,18 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/columns':
             try: return self._respond(200, self.server.app.columns())
             except ValueError as exc: return self._respond(409, {'error': str(exc)})
+        if path in ('/api/collection', '/api/topics'):
+            try:
+                return self._respond(200, self.server.app.collection_state() if path == '/api/collection' else self.server.app.topics())
+            except Exception as exc: return self._respond(409, {'error': str(exc)})
+        if path == '/api/screen/options':
+            try: return self._respond(200, self.server.app.screening_options())
+            except ValueError as exc: return self._respond(409, {'error': str(exc)})
+        if path == '/api/screen/process':
+            try:
+                batch_id = parse_qs(urlsplit(self.path).query).get('batch_id', [None])[0]
+                return self._respond(200, self.server.app.screening_process(batch_id))
+            except ValueError as exc: return self._respond(404, {'error': str(exc)})
         if path == '/api/state':
             try:
                 return self._respond(200, self.server.app.state(parse_qs(urlsplit(self.path).query).get('line_id', [None])[0]))
@@ -469,7 +481,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._production_write(path, 'POST')
         if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
             return self._respond(415, {'error': '需要 JSON 请求'})
-        if path not in ('/api/collect', '/api/screen', '/api/stop', '/api/rank'):
+        if path not in ('/api/collect', '/api/collection/settings', '/api/screen', '/api/screen/batch', '/api/screen/preview', '/api/screen/start', '/api/stop', '/api/rank'):
             return self._respond(404, {'error': '接口不存在'})
         try:
             size = int(self.headers.get('Content-Length', '0'))
@@ -479,7 +491,15 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 raise ValueError('请求格式无效')
             if path == '/api/collect':
-                result = self.server.app.start_collect(body.get('limit'), body.get('source_ids'), body.get('line_id'))
+                result = self.server.app.start_collection_plan(body)
+            elif path == '/api/collection/settings':
+                result = self.server.app.save_collection_settings(body)
+            elif path == '/api/screen/preview':
+                result = self.server.app.preview_screening(body)
+            elif path == '/api/screen/start':
+                result = self.server.app.start_screening_preview(body.get('token'))
+            elif path == '/api/screen/batch':
+                result = self.server.app.screen_columns(body.get('line_ids'), body.get('resume') is True)
             elif path == '/api/screen':
                 result = self.server.app.start_screen(body.get('batch_id'), body.get('refs'), body.get('line_id'), body.get('format'))
             elif path == '/api/rank':
@@ -487,7 +507,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 result = self.server.app.stop(body.get('batch_id'))
             return self._respond(202, result)
-        except (ValueError, json.JSONDecodeError) as exc:
+        except (ValueError, RuntimeError, json.JSONDecodeError) as exc:
             return self._respond(409, {'error': str(exc)})
         except Exception as exc:
             return self._respond(500, {'error': str(exc)})
@@ -534,7 +554,7 @@ class Handler(BaseHTTPRequestHandler):
         cover = re.fullmatch(r'/api/production/jobs/([A-Za-z0-9_-]+)/cover', path)
         body_image = re.fullmatch(r'/api/production/jobs/([A-Za-z0-9_-]+)/body-image', path)
         connect = re.fullmatch(r'/api/production/accounts/([A-Za-z0-9_-]+)/connect', path)
-        known = ((method == 'POST' and (path in ('/api/production/jobs', '/api/production/actions', '/api/production/accounts', '/api/production/preview', '/api/production/session/start', '/api/production/session/end') or cover or body_image or connect or entries))
+        known = ((method == 'POST' and (path in ('/api/production/jobs', '/api/production/batch', '/api/production/actions', '/api/production/accounts', '/api/production/preview', '/api/production/session/start', '/api/production/session/end') or cover or body_image or connect or entries))
                  or (method == 'PATCH' and job))
         if not known:
             return self._respond(404, {'error': '接口不存在'})
@@ -587,16 +607,18 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/api/production/preview':
                 platform, theme, html = body.get('platform'), body.get('theme'), body.get('body_html')
                 presentation_mode = body.get('presentation_mode')
-                if platform not in ('wechat', 'toutiao') or theme not in ('simple', 'default') or not isinstance(html, str) or presentation_mode not in (None, 'toutiao_native') or (presentation_mode == 'toutiao_native' and platform != 'toutiao'):
+                if platform not in ('local', 'wechat', 'toutiao') or theme not in ('simple', 'default') or not isinstance(html, str) or presentation_mode not in (None, 'toutiao_native') or (presentation_mode == 'toutiao_native' and platform != 'toutiao'):
                     raise TypeError('预览需要有效平台、主题和正文')
                 result = service.preview(platform, theme, html, presentation_mode)
+            elif path == '/api/production/batch':
+                result = service.create_batch(body.get('selections'), body.get('targets', []))
             elif path == '/api/production/jobs':
                 batch_id = self._string(body.get('batch_id'), 'batch_id')
                 event_ids, targets = body.get('event_ids'), body.get('targets')
                 if not isinstance(event_ids, list) or not event_ids or not all(isinstance(x, str) and x.strip() for x in event_ids):
                     raise TypeError('event_ids 必须是非空字符串数组')
-                if not isinstance(targets, list) or not targets:
-                    raise TypeError('targets 必须是非空数组')
+                if not isinstance(targets, list):
+                    raise TypeError('targets 必须是数组；空数组表示本地制作')
                 result = service.create_jobs(batch_id, event_ids, targets, body.get('expected_versions'))
             elif path == '/api/production/actions':
                 ids, action, revisions = body.get('job_ids'), body.get('action'), body.get('expected_revisions')

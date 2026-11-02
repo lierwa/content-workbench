@@ -150,6 +150,7 @@ a {color:#315f91;}
 
 def render_rich_html(value, platform, theme='default', presentation_mode=None):
     """Apply platform defaults to sanitized editable HTML, preserving explicit styles."""
+    if platform == 'local': return sanitize_rich_html(value)
     if platform not in ('wechat', 'toutiao'):
         raise ValueError('不支持的发布平台')
     if presentation_mode not in (None, 'toutiao_native'):

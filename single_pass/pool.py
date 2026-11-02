@@ -1,5 +1,6 @@
 """Persistent source identities and per-column decisions; run files hold evidence."""
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -11,9 +12,17 @@ from . import screening_policy as policy
 
 def canonical(url):
     parts = urlsplit(url or '')
+    if (parts.hostname in ('www.toutiao.com', 'toutiao.com')
+            and re.fullmatch(r'/(?:trending|article)/\d+/?', parts.path)):
+        return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip('/'), '', ''))
     query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
              if not k.lower().startswith('utm_') and k.lower() not in ('spm', 'fbclid', 'gclid')]
     return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, urlencode(query), ''))
+
+
+def content_fingerprint(value):
+    return policy.digest({k: canonical(value.get(k)) if k in ('entry_url', 'url') else value.get(k)
+                          for k in ('title', 'summary', 'entry_url', 'url', 'published_at', 'event_time')})
 
 
 def instant(value):
@@ -27,7 +36,7 @@ def instant(value):
 def fresh(item, line, at=None):
     at = at or datetime.now(timezone.utc)
     stamp = instant(item.get('published_at')) or instant(item.get('first_seen_at'))
-    return bool(stamp and at - timedelta(hours=line['valid_hours']) <= stamp <= at)
+    return bool(stamp and at - timedelta(hours=line.get('_scope_hours', line['valid_hours'])) <= stamp <= at)
 
 
 def input_basis(items, line):
@@ -54,6 +63,11 @@ class Pool:
                     stage TEXT NOT NULL, decision TEXT NOT NULL, reason TEXT NOT NULL,
                     processed_at TEXT NOT NULL,
                     PRIMARY KEY(line_id, format, item_id));
+                CREATE TABLE IF NOT EXISTS collection_items (
+                    run_id TEXT NOT NULL, item_id TEXT NOT NULL, version INTEGER NOT NULL,
+                    observed_at TEXT NOT NULL, payload TEXT NOT NULL,
+                    PRIMARY KEY(run_id, item_id));
+                CREATE INDEX IF NOT EXISTS collection_item_lookup ON collection_items(item_id, version);
             ''')
 
     @contextmanager
@@ -66,7 +80,7 @@ class Pool:
         finally:
             db.close()
 
-    def ingest(self, items, observed_at):
+    def ingest(self, items, observed_at, run_id=None):
         counts = {'new': 0, 'changed': 0, 'unchanged': 0}
         changed = []
         with self.connect() as db:
@@ -75,9 +89,8 @@ class Pool:
                 identity = ('key:' + str(value['source_key'])) if value.get('source_key') else 'url:' + canonical(value['entry_url'])
                 ref = value['source_id'] + ':' + policy.digest(identity)[:24]
                 old = db.execute('SELECT * FROM pool_items WHERE id=?', (ref,)).fetchone()
-                fingerprint = policy.digest({k: canonical(value.get(k)) if k in ('entry_url', 'url') else value.get(k)
-                                             for k in ('title', 'summary', 'entry_url', 'url', 'published_at', 'event_time')})
-                different = bool(old and old['fingerprint'] != fingerprint)
+                fingerprint = content_fingerprint(value)
+                different = bool(old and content_fingerprint(json.loads(old['payload'])) != fingerprint)
                 version = old['version'] + int(different) if old else 1
                 value.update(ref=ref, version=version, fingerprint=fingerprint,
                              first_seen_at=old['first_seen_at'] if old else observed_at,
@@ -87,6 +100,9 @@ class Pool:
                            (ref, value['source_id'], identity, version, fingerprint, value['first_seen_at'], observed_at,
                             json.dumps(value, ensure_ascii=False)))
                 counts['new' if not old else 'changed' if different else 'unchanged'] += 1
+                if run_id:
+                    db.execute('INSERT OR REPLACE INTO collection_items VALUES (?,?,?,?,?)',
+                               (run_id, ref, version, observed_at, json.dumps(value, ensure_ascii=False)))
                 if different:
                     changed.append(ref)
         return dict(counts, changed_refs=changed)

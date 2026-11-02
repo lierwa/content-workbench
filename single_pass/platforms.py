@@ -962,6 +962,12 @@ class PlatformAdapter:
         """Start or return this adapter's explicitly owned task window."""
         with self._browser_lock:
             status = self._browser_status()
+            browsers = [x for x in status.get("browsers", []) if not x.get("unresponsive")]
+            if len(browsers) == 1:
+                protocol = str(browsers[0].get('extension_protocol_version') or '')
+                match = re.fullmatch(r'(\d+)\.(\d+)', protocol)
+                if match and tuple(map(int, match.groups())) < (1, 8):
+                    raise RuntimeError(f'浏览器扩展协议为 {protocol}，取材需要 1.8 或更高兼容版本；请更新 BrowserSkill 扩展后重试')
             if self._persistent_browser_session:
                 owned = self._persistent_browser_session['session_id']
                 if any(x.get('session_id') == owned for x in status.get('sessions', [])):
@@ -971,7 +977,6 @@ class PlatformAdapter:
                 if status.get('sessions'):
                     raise RuntimeError('存在其他任务窗口，不能替换会话')
                 raise RuntimeError('原任务浏览器会话已结束，已保留续作记录；未自动新建窗口')
-            browsers = [x for x in status.get("browsers", []) if not x.get("unresponsive")]
             if len(browsers) != 1 or status.get("sessions"):
                 raise RuntimeError("需要唯一在线浏览器且不能有其他浏览器任务")
             created = json.loads(self._bsk("session", "start", "--browser", browsers[0]["instance_id"], "--json"))

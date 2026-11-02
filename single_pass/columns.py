@@ -93,8 +93,6 @@ class ColumnConfig:
             raise ValueError('目标账号无效')
         if len({(t['platform'], t['account_id']) for t in targets}) != len(targets):
             raise ValueError('目标账号不能重复')
-        if line.get('auto_draft') and not targets:
-            raise ValueError('自动做稿需要选择目标账号')
 
     def snapshot(self, config=None):
         config = config or self.read()

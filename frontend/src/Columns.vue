@@ -57,7 +57,7 @@ function enter(line){switchSelection(line.id);creation.format=line.format;router
 function editSource(value){source.value={...value};sourceRevision.value=data.value.revision;fieldError.value='';sourceOpen.value=true}
 async function saveSource(){pending.value=true;fieldError.value='';try{await api('/api/sources/'+source.value.id,{expected_revision:sourceRevision.value,source:{enabled:source.value.enabled,interval_minutes:source.value.interval_minutes}},'PATCH');sourceOpen.value=false;await refresh();ElMessage.success('来源设置已保存')}catch(e){fieldError.value=e.message}finally{pending.value=false}}
 watch(()=>route.path,()=>{editing.value=false;sourceOpen.value=false;refresh()})
-watch(accountIds,ids=>{if(!ids.length)form.value.auto_draft=false})
+
 watch(()=>form.value.mode,(next,previous)=>{
   if(!editingId.value&&data.value.screening_templates?.[next]&&JSON.stringify(form.value.screening_rules)===JSON.stringify(data.value.screening_templates?.[previous])){
     form.value.screening_rules=JSON.parse(JSON.stringify(data.value.screening_templates[next]))
@@ -113,11 +113,11 @@ onMounted(refresh)
         <div class="setting-row"><label>自动筛选</label><el-switch v-model="automatic" aria-label="自动筛选" /></div>
         <el-form-item v-if="automatic" label="筛选间隔"><div class="number-field"><el-input-number v-model="form.interval_minutes" :min="1" :max="10080" aria-label="筛选间隔"/><span>分钟</span></div></el-form-item>
         <el-form-item label="目标账号"><el-checkbox-group v-model="accountIds" class="account-picker"><el-checkbox v-for="a in accounts" :key="a.id" :value="a.id">{{a.platform==='wechat'?'公众号':'今日头条'}} · {{a.identity?.name||a.display_name}}</el-checkbox></el-checkbox-group><RouterLink v-if="!accounts.length" to="/accounts">添加账号</RouterLink></el-form-item>
-        <div class="setting-row"><label>自动做稿并存草稿</label><el-switch v-model="form.auto_draft" aria-label="自动做稿并存草稿" :disabled="!accountIds.length" /></div>
+        <div class="setting-row"><label>自动制作本地或所选平台稿</label><el-switch v-model="form.auto_draft" aria-label="自动制作本地或所选平台稿" /></div>
       </div>
     </el-form>
     <template #footer><el-button :disabled="pending" @click="editing=false">取消</el-button><el-button type="primary" :loading="pending" @click="save">保存栏目</el-button></template>
   </el-drawer>
 
-  <el-dialog v-model="sourceOpen" :title="source?.name" width="440px" :close-on-click-modal="false"><template v-if="source"><div class="setting-row"><label>启用来源</label><el-switch v-model="source.enabled" aria-label="启用来源" /></div><div class="setting-row"><label>自动采集</label><el-switch v-model="collecting" aria-label="自动采集" /></div><el-form v-if="collecting" label-position="top"><el-form-item label="采集间隔"><div class="number-field"><el-input-number v-model="source.interval_minutes" :min="1" :max="10080" aria-label="采集间隔"/><span>分钟</span></div></el-form-item></el-form><el-alert v-if="fieldError" :title="fieldError" type="error" :closable="false"/></template><template #footer><el-button @click="sourceOpen=false">取消</el-button><el-button type="primary" :loading="pending" @click="saveSource">保存</el-button></template></el-dialog>
+  <el-dialog v-model="sourceOpen" :title="source?.name" width="440px" :close-on-click-modal="false"><template v-if="source"><div class="setting-row"><label>启用来源</label><el-switch v-model="source.enabled" aria-label="启用来源" /></div><div class="setting-row"><RouterLink to="/pool">统一采集与定时设置 →</RouterLink></div><el-alert v-if="fieldError" :title="fieldError" type="error" :closable="false"/></template><template #footer><el-button @click="sourceOpen=false">取消</el-button><el-button type="primary" :loading="pending" @click="saveSource">保存</el-button></template></el-dialog>
 </template>

@@ -24,9 +24,12 @@ def work_identity(job):
     line = packet.get('line') or {}
     if not line.get('id'):
         return policy.digest({'creation': job.get('creation_id') or job['id'], 'event': job.get('event_id')})[:32]
-    return policy.digest({'line': line['id'], 'format': packet.get('format', 'single'),
+    identity = {'line': line['id'], 'format': packet.get('format', 'single'),
         'edition': packet.get('edition_id') if packet.get('format') == 'digest' else None,
-        'items': None if packet.get('format') == 'digest' else sorted((i['ref'], i.get('version')) for i in packet.get('items', []))})[:32]
+        'items': None if packet.get('format') == 'digest' else sorted((i['ref'], i.get('version')) for i in packet.get('items', []))}
+    if packet.get('format') == 'digest':
+        identity['entries'] = [(e['id'], e['version']) for e in packet.get('entries', [])]
+    return policy.digest(identity)[:32]
 
 
 class ProductionService:
@@ -44,6 +47,7 @@ class ProductionService:
         self.editorial_locks = {}
         self.composition_failures = {}
         self.cancels = {}
+        self.local_futures = {}
         self.running = set()
         self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix='production')
         # Platform accounts share one owned browser session. Queue the whole
@@ -129,7 +133,10 @@ class ProductionService:
             for source in job.get('packet', {}).get('materials', []):
                 source.pop('content', None)
             # Full editorial evidence is available on demand, not on every poll.
-            job['content_review'] = {'approved':job['editorial_approved'], 'decision':(job.get('editorial_review') or {}).get('decision')}
+            verdict = job.get('editorial_review') or {}
+            job['content_review'] = {'approved':job['editorial_approved'], 'decision':verdict.get('decision'),
+                'current': editorial.reusable(verdict, job, draft) and not job.get('changed_source_refs'),
+                'issue_count': len(verdict.get('issues', []))}
             job['platform_save'] = {k:(job.get('remote') or {}).get(k) for k in ('draft_id','status','verified_hash','verified_identity')}
             job.pop('history', None)
             for field in ('writing','edited','editorial_review','cover_candidates'):
@@ -207,12 +214,33 @@ class ProductionService:
         return {'html':composition.render_body(cleaned, platform, theme, presentation_mode)}
 
     def create_jobs(self, batch_id, event_ids, targets, expected_versions=None, automatic=False):
+        screen.check_runtime()
         with self.creation_lock:
             return self._create_jobs(batch_id, event_ids, targets, expected_versions, automatic)
+
+    def create_batch(self, selections, targets):
+        if not isinstance(selections, list) or not selections or len(selections) > 100:
+            raise ValueError('请选择要制作的栏目选题')
+        if not isinstance(targets, list): raise ValueError('目标账号格式无效')
+        results = []
+        for selection in selections:
+            try:
+                if not isinstance(selection, dict): raise ValueError('选题格式无效')
+                result = self.create_jobs(selection.get('batch_id'), selection.get('event_ids'), targets,
+                                          selection.get('expected_versions'))
+                results.extend(dict(row, batch_id=selection.get('batch_id')) for row in result['results'])
+            except (ValueError, RuntimeError) as exc:
+                results.append({'ok': False, 'batch_id': selection.get('batch_id') if isinstance(selection, dict) else None,
+                                'error': str(exc)})
+        return {'results': results}
 
     def _create_jobs(self, batch_id, event_ids, targets, expected_versions=None, automatic=False):
         if not isinstance(event_ids, list) or not isinstance(targets, list):
             raise ValueError('需要选题和目标账号列表')
+        if not event_ids or any(not isinstance(x, str) or not x for x in event_ids):
+            raise ValueError('请选择选题')
+        local = not targets
+        if local: targets = [{'platform': 'local', 'account_id': None}]
         source = self.candidate_provider(batch_id)
         if (source.get('batch') or {}).get('id') != batch_id:
             raise ValueError('批次已变化，请刷新')
@@ -225,7 +253,8 @@ class ProductionService:
                 raise ValueError('集合必须选择本线已核实候选')
             if not isinstance(expected_versions, dict) or any(expected_versions.get(e['id']) != e.get('version') for e in selected):
                 raise ValueError('集合条目版本已变化，请重新选择')
-            digest_id = 'edition:' + source['edition_id']
+            selection_id = policy.digest([(e['id'], e['version']) for e in selected])[:16]
+            digest_id = 'edition:' + source['edition_id'] + ':' + selection_id
             merged = {'id': digest_id, 'refs': list(dict.fromkeys(r for e in selected for r in e['refs'])),
                 'materials': list({m['material_id']: m for e in selected for m in e['materials']}.values()),
                 'assessment': {'decision': 'keep', 'unknowns': [u for e in selected for u in (e.get('assessment') or {}).get('unknowns', [])]},
@@ -235,7 +264,7 @@ class ProductionService:
                              'assessment': e['assessment'], 'version': e['version']} for e in selected]}
             merged['version'] = policy.digest([(e['id'], e['version']) for e in selected])
             event_ids, events, expected_versions = [digest_id], {digest_id: merged}, {digest_id: merged['version']}
-        accounts = self._adapter('list_accounts')
+        accounts = [] if local else self._adapter('list_accounts')
         if not isinstance(accounts, list): raise ValueError('无法读取平台账号')
         results = []
         creation_id = uuid.uuid4().hex
@@ -244,11 +273,11 @@ class ProductionService:
             for target in targets:
                 try:
                     if event_id not in events: raise ValueError('选题不是当前最终候选')
-                    if not isinstance(target, dict) or target.get('platform') not in ('wechat', 'toutiao') or not isinstance(target.get('account_id'), str) or not target['account_id'].strip():
+                    if not local and (not isinstance(target, dict) or target.get('platform') not in ('wechat', 'toutiao') or not isinstance(target.get('account_id'), str) or not target['account_id'].strip()):
                         raise ValueError('目标平台或账号无效')
                     target = {'platform':target['platform'], 'account_id':target['account_id']}
-                    account = next((a for a in accounts if a.get('id') == target['account_id'] and a.get('platform') == target['platform']), None)
-                    if not account: raise ValueError('目标账号不存在或平台不匹配')
+                    account = {} if local else next((a for a in accounts if a.get('id') == target['account_id'] and a.get('platform') == target['platform']), None)
+                    if account is None: raise ValueError('目标账号不存在或平台不匹配')
                     event = events[event_id]
                     if (source.get('review') or {}).get('policy_hash') != policy.policy_hash():
                         raise ValueError('选题属于旧策略，请按当前版本继续筛选')
@@ -262,13 +291,22 @@ class ProductionService:
                     if not any(m.get('status') == 'read' and m.get('content') for m in sources):
                         raise ValueError('选题缺少已读正文')
                     adoption_key = policy.digest({'line': line.get('id'), 'format': line.get('format', 'single'),
-                        'edition': source.get('edition_id') if line.get('format') == 'digest' else None,
+                        'edition': (source.get('edition_id') + ':' + selection_id) if line.get('format') == 'digest' else None,
                         'items': None if line.get('format') == 'digest' else sorted((i['ref'], i.get('version')) for i in ref_items),
                         'target': target})
                     existing = next((j for j in self.jobs.values() if j.get('adoption_key') == adoption_key), None)
+                    if not existing and line.get('format') == 'digest':
+                        existing = next((j for j in self.jobs.values() if j['target'] == target
+                            and j['packet'].get('line', {}).get('id') == line.get('id')
+                            and j['packet'].get('format') == 'digest'
+                            and j['packet'].get('edition_id') == source.get('edition_id')
+                            and (automatic or [(e['id'], e['version']) for e in j['packet'].get('entries', [])]
+                                 == [(e['id'], e['version']) for e in event['entries']])), None)
                     if existing:
                         if existing['status'] == 'cancelled' and not automatic:
-                            self._check_adoption(ref_items, target, line, event)
+                            if existing['id'] in self.running:
+                                raise ValueError('原任务正在停止，请稍后重新加入队列')
+                            predecessors = self._check_adoption(ref_items, target, line, event, semantic=False)
                             with self.lock:
                                 if (set(existing['packet']['refs']) != set(event['refs'])
                                         or existing['packet'].get('entries') != event.get('entries', [])):
@@ -283,14 +321,15 @@ class ProductionService:
                                     existing['batch_id'] = batch_id
                                     for key in ('writing', 'edited', 'editorial_review'):
                                         existing.pop(key, None)
-                                existing.update(status='queued', stage='queued', error=None, auto_sync=True,
-                                                revision=existing['revision'] + 1, approval=None)
+                                existing.update(status='queued', stage='queued', error=None, auto_sync=False,
+                                                revision=existing['revision'] + 1, approval=None,
+                                                adoption_predecessors=predecessors)
                                 self._record(existing, 'explicitly_resumed')
                                 self._enqueue(existing['id'], 'compose')
                         results.append({'event_id': event_id, 'target': target, 'job_id': existing['id'], 'ok': True,
                                         'reused': True, 'status': existing['status']})
                         continue
-                    self._check_adoption(ref_items, target, line, event)
+                    predecessors = self._check_adoption(ref_items, target, line, event, semantic=False)
                     with self.lock:
                         existing = next((j for j in self.jobs.values() if j['batch_id'] == batch_id and j['event_id'] == event_id and j['target'] == target and j['status'] != 'cancelled'), None)
                         if existing: raise ValueError('该选题和账号已有任务')
@@ -307,14 +346,17 @@ class ProductionService:
                                 '\n\n所选账号约束：\n' + packet['account_guidance'] if packet['account_guidance'] else '')
                         editorial.require_original({'packet':packet})
                         job = {'id':job_id, 'batch_id':batch_id, 'event_id':event_id, 'source_title':ref_items[0].get('title') or '', 'target':target,
+                            'adoption_predecessors': predecessors,
                             'cover_candidates':copy.deepcopy(event.get('cover_candidates') or []),'cover_search_version':0,
-                            'packet':packet, 'adoption_key':adoption_key, 'auto_sync':True, 'creation_id':creation_id, 'shared_title_max':shared_title_max, 'stage':'queued', 'status':'queued', 'revision':1, 'created_at':now, 'updated_at':now,
+                            'packet':packet, 'adoption_key':adoption_key, 'auto_sync':False, 'creation_id':creation_id, 'shared_title_max':shared_title_max, 'stage':'queued', 'status':'queued', 'revision':1, 'created_at':now, 'updated_at':now,
                             'draft':{'title':'','summary':'','markdown':'','body_html':'','content_format':'richtext','html':'','theme':'simple',
                                 'work_statements':['引用AI'] if target['platform']=='toutiao' else None,
                                 'first_publish':False if target['platform']=='toutiao' else None, 'original':False if target['platform']=='toutiao' else None,
                                 'cover_url':None,'cover_sha256':None,'sources':[], 'title_review':None,'editorial_notes':[]},
                             'remote':None, 'approval':None, 'error':None, 'last_action':'created', 'history':[]}
-                        job['work_id'] = work_identity(job)
+                        identity = work_identity(job)
+                        job['work_id'] = next((j['work_id'] for j in self.jobs.values()
+                                               if work_identity(j) == identity), identity)
                         self.jobs[job_id] = job
                         self._record(job, 'created')
                         self._enqueue(job_id, 'compose')
@@ -325,8 +367,7 @@ class ProductionService:
 
     def occupied_inputs(self, line):
         """Unchanged inputs already used by every configured target account."""
-        targets = line.get('targets') or []
-        if not targets: return set()
+        targets = line.get('targets') or [{'platform': 'local', 'account_id': None}]
         from . import pool
         occupied = []
         with self.lock:
@@ -335,6 +376,7 @@ class ProductionService:
                 for job in self.jobs.values():
                     packet = job['packet']
                     if (job['target'] != target or job['status'] == 'cancelled'
+                            or (target['platform'] == 'local' and packet.get('line', {}).get('id') != line.get('id'))
                             or packet.get('format', 'single') != line.get('format', 'single')):
                         continue
                     adopted = policy.adopted_refs(packet)
@@ -344,22 +386,26 @@ class ProductionService:
                 occupied.append(pairs)
         return set.intersection(*occupied)
 
-    def _check_adoption(self, items, target, line, event=None):
+    def _check_adoption(self, items, target, line, event=None, *, semantic=True, prior_ids=None, cancel=None):
         from . import pool, review
         scope = event or {'refs': [i['ref'] for i in items]}
         if line and any(not pool.fresh(i, line) for i in items if i['ref'] in policy.freshness_refs(scope)):
             raise ValueError('选题已超过栏目有效期，请重新选稿')
         prior = [j for j in self.jobs.values() if j['target'] == target
+                 and (prior_ids is None or j['id'] in prior_ids)
+                 and (target['platform'] != 'local' or j['packet'].get('line', {}).get('id') == line.get('id'))
                  and j['status'] != 'cancelled' and j['packet'].get('format', 'single') == line.get('format', 'single')
                  and (j.get('status') != 'published' or any(pool.fresh(i, line) for i in j['packet']['items']))]
         refs = {i['ref'] for i in items} & policy.adopted_refs(scope)
         if any(refs.intersection(policy.adopted_refs(j['packet'])) for j in prior):
-            raise ValueError('本账号同形式已有作品占用此消息，请继续原稿或取消未发布作品')
+            raise ValueError(('本栏目本地稿' if target['platform'] == 'local' else '本账号同形式') + '已有作品占用此消息，请继续原稿或取消未发布作品')
+        if not semantic:
+            return [j['id'] for j in prior]
         if not prior:
             return
         root = self.root / 'adoption'
         (root / 'runtime').mkdir(parents=True, exist_ok=True)
-        cancel = threading.Event()
+        cancel = cancel if cancel is not None else threading.Event()
         value = review.call_model(root / 'review', 'adoption', review.obj({'duplicate': {'type': 'boolean'}, 'reason': review.S}),
             '判断新选题是否与同账号同形式正在制作或近期已发布的作品重复。具体主体、行动、对象和进展都相同才重复，'
             '同主题或同一人物的不同事件不算。确有新增进展可单独成稿；不按标题完全匹配。'
@@ -446,7 +492,7 @@ class ProductionService:
             cancel = self.cancels.setdefault(job_id, threading.Event())
             cancel.clear()
             if operation in ('compose', 'reformat', 'review', 'images'):
-                self.executor.submit(self._worker, job_id, operation, cancel)
+                self.local_futures[job_id] = self.executor.submit(self._worker, job_id, operation, cancel)
             else:
                 job = self.jobs[job_id]; job['pending_operation'] = operation; self._record(job, 'queued_' + operation)
                 key = self._account_key(job)
@@ -526,13 +572,26 @@ class ProductionService:
         try:
             with self.lock:
                 job = self.jobs[job_id]
+                if cancel.is_set() or job['status'] == 'cancelled': return
                 if operation != 'verify' and job.get('changed_source_refs'):
                     raise ValueError('来源已变化，先重新选稿并核实受影响消息')
                 if operation in ('compose', 'sync', 'resume_draft', 'publish') and job['packet'].get('line'):
                     from .pool import fresh
                     if any(not fresh(i, job['packet']['line']) for i in job['packet']['items'] if i['ref'] in policy.freshness_refs(job['packet'])):
                         raise ValueError('稿件选题已超过本栏目有效期，请重新选稿')
-            if operation == 'compose': self._compose(job_id, cancel)
+            if operation == 'compose':
+                with self.lock:
+                    view = copy.deepcopy(job) if 'adoption_predecessors' in job else None
+                if view is not None:
+                    # Semantic checks belong to the bounded worker queue. The
+                    # enqueue request only checks exact occupied source refs.
+                    self._check_adoption(view['packet']['items'], view['target'], view['packet'].get('line') or {},
+                        view['packet'], prior_ids=set(view['adoption_predecessors']), cancel=cancel)
+                    with self.lock:
+                        if cancel.is_set(): return
+                        job.pop('adoption_predecessors', None)
+                        self._record(job, 'adoption_checked')
+                self._compose(job_id, cancel)
             elif operation == 'reformat': self._reformat(job_id, cancel)
             elif operation == 'review': self._review_only(job_id, cancel)
             elif operation == 'images': self._refresh_images(job_id, cancel)
@@ -569,6 +628,7 @@ class ProductionService:
         finally:
             with self.lock:
                 self.running.discard(job_id)
+                self.local_futures.pop(job_id, None)
                 if operation not in ('compose', 'reformat', 'review'):
                     job = self.jobs[job_id]
                     if job.get('pending_operation') == operation:
@@ -577,7 +637,7 @@ class ProductionService:
                     self.active_accounts.discard(key); self._dispatch_account(key)
             with self.lock:
                 job = self.jobs[job_id]
-                if (operation in ('compose','reformat','review') and job.get('auto_sync')
+                if (operation in ('compose','reformat') and job.get('auto_sync')
                         and job['stage'] == 'ready_review' and not job.get('remote')
                         and not job.get('error') and editorial.approved(job)):
                     self._record(job, 'auto_sync_queued')
@@ -777,12 +837,6 @@ class ProductionService:
             job['review_return_stage'] = original_stage
             self._phase(job, 'checking')
             view = copy.deepcopy(job)
-        if not view['draft'].get('cover_url') and view.get('cover_search_version') != cover_assets.SEARCH_VERSION:
-            issues = []
-            view['cover_candidates'] = cover_assets.for_materials(self.media_dir, job_id, view['packet']['materials'], (view.get('writing') or {}).get('cover_query'), issues=issues)
-            with self.lock:
-                job['packet']['materials'] = copy.deepcopy(view['packet']['materials'])
-                self._record(job, 'image_preparation', {'candidates': len(view['cover_candidates']), 'issues': issues})
         with self.lock:
             verdict = None
             for other in self.jobs.values():
@@ -799,18 +853,15 @@ class ProductionService:
             verdict = editorial.inspect(self.jobs_dir / job_id, view, view['draft'], cancel)
         with self.lock:
             if cancel.is_set(): return
-            job['cover_candidates'] = view.get('cover_candidates', [])
-            job['cover_search_version'] = cover_assets.SEARCH_VERSION
             job['editorial_review'] = verdict
             job.pop('review_return_stage', None)
             if verdict['passed']:
-                job.update(stage=original_stage, status=original_stage, error=None)
+                return_stage = 'remote_verified' if original_stage == 'remote_verified' else 'ready_review'
+                job.update(stage=return_stage, status=return_stage, error=None)
             else:
                 job.update(stage='needs_attention', status='needs_attention',
                     error=editorial.summary(verdict))
             self._record(job, 'editorial_review', verdict)
-        if verdict['passed'] and not view['draft'].get('cover_url'):
-            self._refresh_images(job_id, cancel)
 
     def _reformat(self, job_id, cancel):
         with self.lock:
@@ -1040,9 +1091,15 @@ class ProductionService:
                         if job.get('pending_operation') or job['stage'] in EXTERNAL_STAGES or job.get('operation_uncertain') or job['status'] == 'outcome_unknown' or (job.get('remote') or {}).get('status') in ('submitted','reviewing','published','outcome_unknown'):
                             raise ValueError('平台操作进行中或已提交，不能取消')
                         self.cancels.setdefault(job_id, threading.Event()).set(); job['approval'] = None
+                        future = self.local_futures.get(job_id)
+                        if future and future.cancel():
+                            self.local_futures.pop(job_id, None)
+                            self.running.discard(job_id)
                         job.update(stage='cancelled', status='cancelled', error=None); self._record(job, 'cancelled')
                     else:
                         if job_id in self.running: raise ValueError('任务正在执行')
+                        if job['target']['platform'] == 'local' and action in ('sync','resume','confirm_publish','verify'):
+                            raise ValueError('本地稿件需要先生成平台稿再投递')
                         if job.get('pending_operation'): raise ValueError('平台操作排队中，请等待账号连接或核验')
                         if action in ('sync','confirm_publish','verify') and self.browser_session_transition: raise ValueError('浏览器任务窗口正在切换，请稍后再试')
                         if action == 'sync':
@@ -1071,9 +1128,12 @@ class ProductionService:
                             job['pending_operation'] = 'publish'
                             self._record(job, 'confirmed')
                         elif action == 'review':
-                            job['local_operation'] = 'review'
                             if job.get('operation_uncertain') or job['stage'] not in ('ready_review','remote_verified','needs_attention'):
                                 raise ValueError('当前状态不能审稿')
+                            job['review_return_stage'] = job['stage']
+                            job['local_operation'] = 'review'
+                            job.update(stage='checking', status='queued', error=None)
+                            self._record(job, 'review_requested')
                         elif action == 'refresh_images':
                             if (job['stage'] not in ('ready_review','remote_verified','needs_attention')
                                     or job.get('operation_uncertain') or job['status'] == 'outcome_unknown'

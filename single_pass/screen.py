@@ -6,6 +6,7 @@ import subprocess
 import threading
 import time
 import uuid
+from functools import lru_cache
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from pathlib import Path
@@ -20,19 +21,51 @@ CHUNK_SIZE = 30
 
 
 def codex_binary():
-    """Resolve the CLI in the server's environment, with an explicit override."""
-    configured = os.environ.get('CODEX_BINARY')
+    return _resolve_codex(os.environ.get('CODEX_BINARY'), os.environ.get('PATH', ''),
+                          os.environ.get('CODEX_APP_RUNTIME_CLI_PATH'))
+
+
+@lru_cache(maxsize=4)
+def _resolve_codex(configured, search_path, app_binary=None):
+    """Probe executable candidates: an npm shim can exist without its native package."""
     if configured:
         binary = shutil.which(os.path.expanduser(configured))
         if not binary:
             raise RuntimeError('CODEX_BINARY 指定的 Codex 不存在或不可执行：' + configured)
-        return binary
-    binary = (shutil.which('codex.exe') if os.name == 'nt' else None) or shutil.which('codex')
-    if binary:
-        return binary
-    if os.path.isfile(MAC_BINARY) and os.access(MAC_BINARY, os.X_OK):
-        return MAC_BINARY
-    raise RuntimeError('未找到 Codex CLI；请在服务运行环境安装并登录 Codex，或设置 CODEX_BINARY 为可执行文件路径')
+        candidates = [binary]
+    else:
+        candidates = [app_binary] if app_binary else []
+        for directory in search_path.split(os.pathsep):
+            for name in (('codex.exe', 'codex.cmd', 'codex') if os.name == 'nt' else ('codex',)):
+                path = Path(directory) / name
+                if path.is_file(): candidates.append(str(path))
+        candidates.extend([MAC_BINARY, '/Applications/Codex.app/Contents/Resources/codex',
+                           str(Path.home() / '.local' / 'bin' / ('codex.exe' if os.name == 'nt' else 'codex'))])
+    failures = []
+    for binary in dict.fromkeys(candidates):
+        if not Path(binary).is_file(): continue
+        try:
+            result = subprocess.run([binary, '--version'], capture_output=True, text=True,
+                                    encoding='utf-8', errors='replace', timeout=10)
+            if result.returncode == 0 and 'codex' in result.stdout.lower(): return binary
+            detail = '缺少平台执行依赖' if 'Missing optional dependency' in result.stderr else '版本检查失败'
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            detail = type(exc).__name__
+        failures.append(f'{binary}（{detail}）')
+    raise RuntimeError('没有可运行的 Codex CLI。请修复安装或设置 CODEX_BINARY。' + '；'.join(failures))
+
+
+def check_runtime():
+    """Fail before creating a run, rather than misreporting an empty partial result."""
+    binary = codex_binary()
+    try:
+        result = subprocess.run([binary, 'login', 'status'], capture_output=True, text=True,
+                                encoding='utf-8', errors='replace', timeout=15)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError('Codex CLI 登录检查失败，请检查本机安装与运行环境') from exc
+    if result.returncode:
+        raise RuntimeError('Codex CLI 尚未登录，请在本机执行 codex login 后重试')
+    return binary
 
 
 def timestamp():

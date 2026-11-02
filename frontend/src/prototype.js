@@ -5,12 +5,17 @@ const data=copy(initial)
 const scene=new URLSearchParams(location.search).get('scene')
 if(scene==='empty'){data.columns.lines=[];data.production={jobs:[],works:[],accounts:[],busy:false};data.states={};data.pool={items:[]}}
 let serial=0
+let collectionSettings={revision:0,scope:'all',line_ids:[],source_ids:[],per_source_limit:null,interval_minutes:null,schedule_mode:'manual',daily_time:'09:00'}
 function version(body){if(body?.expected_revision!==data.columns.revision)throw new Error('栏目配置已变化，请刷新后再保存')}
-function validate(line){if(!line.name?.trim())throw new Error('请填写栏目名称');if(!line.sources?.length)throw new Error('请选择渠道');if(!line.rules?.trim())throw new Error('请填写栏目定位与范围');for(const [stage,label] of [['initial','初筛'],['selection','二筛'],['verification','三筛']])if(!line.screening_rules?.[stage]?.trim())throw new Error(`请填写${label}规则`);if(!Number.isInteger(line.max_candidates)||line.max_candidates<1||line.max_candidates>10)throw new Error('单轮取材上限须为 1 至 10 条');if(line.auto_draft&&!line.targets?.length)throw new Error('自动做稿需要选择目标账号');if(data.columns.lines.some(l=>l.id!==line.id&&l.name===line.name))throw new Error('已存在同名栏目')}
+function validate(line){if(!line.name?.trim())throw new Error('请填写栏目名称');if(!line.sources?.length)throw new Error('请选择渠道');if(!line.rules?.trim())throw new Error('请填写栏目定位与范围');for(const [stage,label] of [['initial','初筛'],['selection','二筛'],['verification','三筛']])if(!line.screening_rules?.[stage]?.trim())throw new Error(`请填写${label}规则`);if(!Number.isInteger(line.max_candidates)||line.max_candidates<1||line.max_candidates>10)throw new Error('单轮取材上限须为 1 至 10 条');if(data.columns.lines.some(l=>l.id!==line.id&&l.name===line.name))throw new Error('已存在同名栏目')}
 export async function request(path,body,method='POST'){
   if(scene==='error')throw new Error('加载失败，请重试')
   const url=new URL(path,'http://prototype.local'), route=url.pathname
   if(body===undefined&&route==='/api/columns')return copy({...data.columns,lines:data.columns.lines.map(l=>({...l,has_history:!!data.states[l.id],running:false}))})
+  if(body===undefined&&route==='/api/topics')return {columns:await Promise.all(data.columns.lines.map(l=>request('/api/state?line_id='+l.id))),concurrency:2}
+  if(body===undefined&&route==='/api/collection')return copy({...data.columns,settings:collectionSettings,run:{status:'idle',sources:[]}})
+  if(body&&route==='/api/collection/settings'){if(body.expected_revision!==collectionSettings.revision)throw new Error('采集设置已变化');collectionSettings={...body.settings,revision:collectionSettings.revision+1};return request('/api/collection')}
+  if(body&&['/api/screen/batch','/api/production/batch'].includes(route))throw new Error('交互原型不执行筛选或制作，请进入实际工作台')
   if(body===undefined&&route==='/api/production')return copy(data.production)
   if(body===undefined&&route==='/api/pool'){
     const statuses={pending:'待筛选',running:'筛选中',selected:'可做稿',dropped:'未采用',not_selected:'本轮未选',insufficient:'待补证',stale:'待复筛',expired:'已过期',unassigned:'未分配栏目'}

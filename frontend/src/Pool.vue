@@ -2,6 +2,7 @@
 import { onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from './api'
+import CollectionControl from './CollectionControl.vue'
 const route=useRoute(), router=useRouter()
 const filters=reactive(Object.fromEntries(['q','category','line_id','source_id','status','hours'].map(k=>[k,String(route.query[k]||'')])))
 const page=ref(1), data=ref({items:[],total:0,pool_total:0,lines:[],sources:[],categories:[],statuses:{}})
@@ -16,7 +17,7 @@ async function refresh(){
 }
 async function poll(){await refresh();if(!disposed)timer=setTimeout(poll,6000)}
 function clear(){for(const key in filters)filters[key]=''}
-async function collect(){sending.value=true;try{await api('/api/collect',filters.source_id?{source_ids:[filters.source_id]}:filters.line_id?{line_id:filters.line_id}:{});await refresh()}catch(e){error.value=e.message}finally{sending.value=false}}
+
 function stamp(value){if(!value)return '—';const d=new Date(value);return Number.isNaN(d.getTime())?'—':d.toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false})}
 function link(value){try{const u=new URL(value);return ['http:','https:'].includes(u.protocol)&&!u.username&&!u.password?u.href:null}catch{return null}}
 function badge(status){return status==='selected'?'success':['insufficient','stale'].includes(status)?'warning':status==='running'?'progress':'neutral'}
@@ -28,7 +29,7 @@ onBeforeUnmount(()=>{disposed=true;sequence++;clearTimeout(timer);clearTimeout(d
 </script>
 
 <template>
-  <header class="page-heading"><div class="actions"><h1>线索池</h1><span class="muted">{{data.pool_total}} 条</span></div><div class="actions"><RouterLink to="/sources">渠道设置</RouterLink><el-button :disabled="sending||data.collecting" @click="collect">{{data.collecting?'采集中':'采集'}}</el-button></div></header>
+  <header class="page-heading"><h1>线索池</h1><div class="actions"><RouterLink to="/sources">渠道设置</RouterLink><CollectionControl @changed="refresh"/></div></header>
   <section class="pool-filters surface" aria-label="线索筛选">
     <el-input v-model="filters.q" placeholder="搜索标题、摘要" aria-label="搜索线索" clearable class="pool-search" />
     <el-select v-model="filters.category" placeholder="来源分类" aria-label="来源分类" clearable><el-option v-for="name in data.categories" :key="name" :label="name" :value="name" /></el-select>

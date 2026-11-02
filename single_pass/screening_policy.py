@@ -43,6 +43,7 @@ def model_context(line, stage):
               ['selection'] if 'selection' in stage else
               ['verification'] if stage in ('assessment','digest-verification') else [])
     context = {k:line.get(k) for k in ('id','name','mode','format','sources','reference_domains','valid_hours','rules')}
+    context['valid_hours'] = line.get('_scope_hours', line.get('valid_hours'))
     context['screening_rules']={s:stage_rules(line,s) for s in stages}
     if 'selection' in stages: context['max_candidates']=selection_limit(line)
     return context
@@ -144,6 +145,7 @@ def line_basis(line):
     value['max_candidates']=selection_limit(line)
     value.pop('enabled', None)
     value.pop('writing_rules', None)
+    value.pop('_scope_hours', None)
     return value
 
 

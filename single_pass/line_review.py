@@ -131,7 +131,7 @@ def execute(root, database, line, cancel, records):
     rules = line['rules']
     store = review.Store(root / 'review', 0)
     store.value.update(policy_version=policy.config()['version'], policy_hash=policy.policy_hash(), event_level_initial=True)
-    if not (root / 'result.json').exists():
+    if not (root / 'result.json').exists() or not (store.root / 'all-events.json').exists():
         store.phase('grouping')
         # Stable membership can reuse grouping; any new/changed item reopens the
         # semantic comparison, including previously dropped or insufficient items.
@@ -177,9 +177,13 @@ def execute(root, database, line, cancel, records):
                 pending.append(event)
         store.value['events'] = pending
         store.save()
+        if rows:
+            checkpoint = store.root / 'initial-progress' / 'reused.json'
+            checkpoint.parent.mkdir(exist_ok=True)
+            screen.write_json(checkpoint, rows)
         if pending:
             store.phase('running', 'initial')
-            new_rows = review.preselect(root, [e for e in event_items if e['ref'] in {p['id'] for p in pending}], items, rules, cancel, compare=not reused)
+            new_rows = review.preselect(root, [e for e in event_items if e['ref'] in {p['id'] for p in pending}], items, rules, cancel, compare=False)
             updated_state = review.Store(store.root, 0).value
             updated = updated_state['events']
             store.value['selection_prompt_hash']=updated_state.get('selection_prompt_hash')

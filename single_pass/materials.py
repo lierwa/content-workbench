@@ -162,6 +162,23 @@ def parse_material(page, final_url, entry=False):
     metadata = trafilatura.extract_metadata(page, default_url=final_url)
     published = _PublishedDate()
     published.feed(page)
+    if urllib.parse.urlsplit(final_url).hostname in ('36kr.com', 'www.36kr.com'):
+        # 36kr also emits article:published_time for the page-render time.
+        # Only the visible timestamp beside this article's heading is its date.
+        from lxml import html as lxml_html
+        tree = lxml_html.fromstring(page)
+        nodes = tree.xpath(
+            '//*[contains(concat(" ",normalize-space(@class)," ")," article-title-icon ")]'
+            '//*[contains(concat(" ",normalize-space(@class)," ")," item-time ")] | '
+            '//*[contains(concat(" ",normalize-space(@class)," ")," item-other ")]'
+            '//*[contains(concat(" ",normalize-space(@class)," ")," time ")]')
+        published.value = None
+        for node in nodes:
+            match = re.search(r'(\d{4})[-年](\d{1,2})[-月](\d{1,2})日?\s+(\d{2}):(\d{2})(?::(\d{2}))?', node.text_content())
+            if match:
+                parts = [int(value or 0) for value in match.groups()]
+                published.value = dt.datetime(*parts, tzinfo=dt.timezone(dt.timedelta(hours=8))).isoformat()
+                break
     if not published.value:
         from lxml import html as lxml_html
         tree = lxml_html.fromstring(page)

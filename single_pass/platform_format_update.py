@@ -1,11 +1,8 @@
 """Update only paragraph layout/emphasis in a previously verified platform draft."""
-import base64
 import copy
-import gzip
 import html
 import json
 import re
-import time
 from pathlib import Path
 from io import BytesIO
 from urllib.error import HTTPError
@@ -103,73 +100,3 @@ def reconcile(snapshot,remote,actual,adapter=None):
         raise ValueError('排版更新之外的字段发生变化')
     mapping,checks=checked_images(snapshot,remote,actual['html'],adapter)
     return dict(remote,image_map=mapping,layout_image_checks=checks)
-
-
-def save(adapter,account,snapshot,remote):
-    from .platforms import _safe_bsk_error
-    from .toutiao_publisher import ToutiaoPublisher
-    started=False
-    try:
-        actual=adapter.inspect_draft(account['id'],dict(remote,title=snapshot['title']))
-        if actual.get('status')!='ok':
-            raise ValueError(actual.get('message') or '平台草稿回读失败')
-        if not unchanged(actual,remote['readback']):
-            raise ValueError('平台草稿已有外部修改，不能覆盖排版')
-        if not eligible(snapshot,remote):raise ValueError('排版更新不得改写内容或替换封面')
-        platform=account['platform'];identity=actual['account_identity']
-        with adapter._lock(account['id']),adapter._browser_lock:
-            session,owned=adapter._acquire_browser_session()
-            if owned:raise ValueError('需要复用已核验的任务窗口')
-            tabs=json.loads(adapter._bsk('tab','list','--scope','agent','--session',session,'--json'))['tabs']
-            field='appmsgid' if platform=='wechat' else 'pgc_id'
-            domain='mp.weixin.qq.com' if platform=='wechat' else 'mp.toutiao.com'
-            tab=next((str(t['tab_id']) for t in tabs if urlsplit(t['url']).hostname==domain
-                and parse_qs(urlsplit(t['url']).query).get(field)==[remote['draft_id']]),None)
-            if tab is None:raise ValueError('已核验的草稿编辑页不存在')
-            adapter._bsk('tab','select',tab,'--session',session)
-            def evaluate(script):
-                value=json.loads(adapter._bsk('evaluate','--json','--session',session,'--tab-id',tab,script))
-                if not value.get('ok'):raise ValueError('草稿页面读取失败')
-                return value.get('value')
-            selector='.ProseMirror[contenteditable=true]:not([data-placeholder])' if platform=='wechat' else '.ProseMirror[contenteditable=true]'
-            current=evaluate('document.querySelector('+json.dumps(selector)+')?.innerHTML')
-            current=ToutiaoPublisher._canonical_body(current) if platform=='toutiao' else current
-            if not unchanged(dict(actual,html=current),actual):raise ValueError('编辑页在回读后发生变化')
-            rendered=snapshot['html']
-            for src,url in remote.get('image_map',{}).items():rendered=rendered.replace(html.escape(src,quote=True),html.escape(url,quote=True))
-            if any(x['src'].startswith('/api/') for x in composition.semantic_html(rendered)['images']):raise ValueError('缺少既有图片映射')
-            data={'html':rendered,'plain':'\n\n'.join(composition.semantic_html(rendered)['paragraphs']),
-                  'selected_words':words(current)}
-            payload=base64.b64encode(gzip.compress(json.dumps(data,ensure_ascii=False).encode())).decode()
-            script=r"""(async()=>{const b=document.querySelector(SELECTOR);if(!b)return false;
-                const stream=new Blob([Uint8Array.from(atob(PAYLOAD),c=>c.charCodeAt(0))]).stream().pipeThrough(new DecompressionStream('gzip'));
-                const d=JSON.parse(await new Response(stream).text());b.focus();
-                const range=document.createRange();range.selectNodeContents(b);
-                const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);
-                await new Promise(resolve=>setTimeout(resolve,150));
-                if(!b.contains(selection.anchorNode)||!b.contains(selection.focusNode)
-                    ||selection.toString().replace(/\s/g,'')!==d.selected_words)return false;
-                const t=new DataTransfer();t.setData('text/html',d.html);t.setData('text/plain',d.plain);
-                const e=new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:t});b.dispatchEvent(e);return e.defaultPrevented})()""".replace('SELECTOR',json.dumps(selector)).replace('PAYLOAD',json.dumps(payload))
-            adapter._observe_stable(session,tab);started=True
-            if evaluate(script) is not True:raise ValueError('编辑器未确认排版更新')
-            time.sleep(10 if platform=='toutiao' else 1)
-            observed=evaluate('document.querySelector('+json.dumps(selector)+').innerHTML')
-            observed=ToutiaoPublisher._canonical_body(observed) if platform=='toutiao' else observed
-            mapping,checks=checked_images(snapshot,remote,observed,adapter,browser_locked=True)
-            rendered=snapshot['html']
-            for src,url in mapping.items():rendered=rendered.replace(html.escape(src,quote=True),html.escape(url,quote=True))
-            matcher=composition.wechat_content_matches if platform=='wechat' else composition.toutiao_content_matches
-            if not matcher(composition.semantic_html(rendered),composition.semantic_html(observed)) or not composition.emphasis_preserved(rendered,observed):
-                raise ValueError('保存前段落、图片或加粗未保留')
-            if platform=='wechat':
-                obs=adapter._observe_stable(session,tab)
-                adapter._bsk('click',adapter._ref(obs,'button','保存为草稿'),'--session',session,'--tab-id',tab)
-            time.sleep(5 if platform=='wechat' else 10)
-            result=dict(remote,status='saved',title=snapshot['title'],account_identity=identity,verified_hash=None,
-                image_map=mapping,layout_image_checks=checks,
-                evidence='在原草稿更新段落与加粗；未新建、未发表，随后独立回读')
-            return result
-    except Exception as exc:
-        return {'status':'unknown' if started else 'needs_attention','draft_id':remote.get('draft_id'),
-            'account_identity':remote.get('account_identity'),'message':'排版更新未通过核验：'+_safe_bsk_error(str(exc))}

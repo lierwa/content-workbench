@@ -22,6 +22,7 @@ __pycache__/
 *.log
 .env
 .env.*
+node_modules/
 
 # Generated frontend bundle and single-collection run artifacts
 /frontend/dist/

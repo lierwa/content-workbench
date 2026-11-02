@@ -578,14 +578,25 @@ class Workspace:
             cancel.prepare_original_reader = self.platform.start_persistent_session if self.platform else None
             cancel.reference_reader = self.platform.read_reference if self.platform else None
             cancel.original_cache = {}
+            cancel.stop_on_source_error = lambda reason: self._stop_source_failure(cancel, reason)
             worker = self.screen_executor.submit(self._screen, root, line, records, cancel)
             self.workers[line['id']] = (worker, cancel)
             return {'run_id': root.name, 'batch_id': root.name, 'status': 'queued'}
 
+    def _stop_source_failure(self, origin, reason):
+        """Keep the first read failure and stop the active screening columns."""
+        with self.lock:
+            active = [token for future, token in self.workers.values() if not future.done()]
+            first = next((token.stop_reason for token in active if getattr(token, 'stop_reason', None)), reason)
+            for token in [origin, *active]:
+                token.stop_reason = first
+                token.set()
+
     def _screen(self, root, line, records, cancel):
         with self.lock:
             batch = read(root / 'batch.json')
-            batch.update(status='stopped' if cancel.is_set() else 'screening')
+            batch.update(status='stopped' if cancel.is_set() else 'screening',
+                         error=getattr(cancel, 'stop_reason', None))
             screen.write_json(root / 'batch.json', batch)
         if cancel.is_set(): return
         timeline = root / 'review' / 'timeline.json'
@@ -602,7 +613,7 @@ class Workspace:
             if status == 'partial' and not error:
                 error = '部分来源尚未完成，已保留本轮可用候选和具体失败记录'
         except Exception as exc:
-            status, error = 'stopped' if cancel.is_set() else 'partial', str(exc)
+            status, error = 'stopped' if cancel.is_set() else 'partial', getattr(cancel, 'stop_reason', None) or str(exc)
             retryable = not isinstance(exc, ValueError)
         with self.lock:
             batch = read(root / 'batch.json')

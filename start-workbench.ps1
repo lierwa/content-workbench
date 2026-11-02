@@ -1,4 +1,7 @@
+param([switch]$CheckRuntime)
+
 $ErrorActionPreference = 'Stop'
+$env:BSK_AUTO_START = '0'
 $taskRoot = $PSScriptRoot
 $taskPython = Join-Path $taskRoot '.venv-win\Scripts\python.exe'
 $taskData = Join-Path $taskRoot 'data\single-pass-v2'
@@ -7,12 +10,38 @@ $taskUrl = 'http://127.0.0.1:18765/'
 $taskMutex = [System.Threading.Mutex]::new($false, 'Local\ContentWorkbench18765Startup')
 $taskAcquired = $false
 
+function Confirm-WorkbenchRuntime {
+    $taskDeadline = [DateTime]::UtcNow.AddSeconds(60)
+    do {
+        $taskRuntime = Invoke-RestMethod -Uri ($taskUrl + 'api/runtime') -TimeoutSec 5
+        if ($taskRuntime.root -ine $taskRoot -or $taskRuntime.data -ine $taskData) {
+            throw 'Runtime endpoint belongs to another checkout or data directory.'
+        }
+        if ($taskRuntime.browser.status -eq 'ready') {
+            Write-Host "Browser ready: port $($taskRuntime.browser.port), protocol $($taskRuntime.browser.extension_protocol_version), active sessions $($taskRuntime.browser.active_sessions)"
+            return
+        }
+        if ($taskRuntime.browser.status -ne 'starting') {
+            throw "Browser runtime is not ready: $($taskRuntime.browser.error)"
+        }
+        Start-Sleep -Milliseconds 500
+    } while ([DateTime]::UtcNow -lt $taskDeadline)
+    throw 'Browser startup is still pending. Inspect browser-runtime.log; do not launch another daemon or session.'
+}
+
 try {
     $taskAcquired = $taskMutex.WaitOne(0)
     if (-not $taskAcquired) { throw 'Another workbench startup is in progress. Please wait.' }
     if (-not (Test-Path -LiteralPath $taskPython -PathType Leaf)) { throw 'Missing .venv-win Python. Install project dependencies first.' }
     if (-not (Test-Path -LiteralPath $taskData -PathType Container)) { throw 'Missing data/single-pass-v2. The existing workbench data was not found.' }
     if (-not (Test-Path -LiteralPath $taskDist -PathType Leaf)) { throw 'Missing frontend build. Run npm.cmd --prefix frontend run build.' }
+    if ($CheckRuntime) {
+        Push-Location -LiteralPath $taskRoot
+        try {
+            & $taskPython -c 'from single_pass.screen import check_runtime; print("Codex ready: " + check_runtime())'
+            if ($LASTEXITCODE -ne 0) { throw 'Codex runtime check failed; no new workbench was started.' }
+        } finally { Pop-Location }
+    }
 
     $taskListening = @(Get-NetTCPConnection -LocalPort 18765 -State Listen -ErrorAction SilentlyContinue)
     if ($taskListening.Count) {
@@ -23,6 +52,14 @@ try {
             throw 'Port 18765 is occupied by a process that is not this workbench.'
         }
         Write-Host "Workbench is already running: $taskUrl"
+        if ($CheckRuntime) {
+            $taskExisting = Invoke-RestMethod -Uri ($taskUrl + 'api/runtime') -TimeoutSec 5
+            if ($taskExisting.root -ine $taskRoot -or $taskExisting.data -ine $taskData) {
+                throw 'Runtime endpoint belongs to another checkout or data directory.'
+            }
+            Invoke-RestMethod -Method Post -Uri ($taskUrl + 'api/runtime/prepare') -ContentType 'application/json' -Body '{}' -TimeoutSec 5 | Out-Null
+            Confirm-WorkbenchRuntime
+        }
         exit 0
     }
 
@@ -44,10 +81,11 @@ try {
             $taskResponse = Invoke-RestMethod -Uri ($taskUrl + 'api/production') -TimeoutSec 1
             if ($null -ne $taskResponse.jobs -and $null -ne $taskResponse.accounts) {
                 Write-Host "Workbench started: $taskUrl"
+                if ($CheckRuntime) { Confirm-WorkbenchRuntime }
                 exit 0
             }
         } catch {
-            if ($_.Exception.Message -eq 'Port 18765 was claimed by another process.') { throw }
+            if ($_.Exception.Message -eq 'Port 18765 was claimed by another process.' -or $null -ne $taskResponse) { throw }
         }
     }
     throw "Workbench did not become ready. See $taskErr"

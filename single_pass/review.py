@@ -685,7 +685,8 @@ def sources_to_refresh(root, event, items_by_ref):
         related = [m for m in event['materials'] if ref in m.get('origin_ref', [])]
         attempt = (event.get('sources', {}).get(ref) or {}).get('resolution_attempt') or {}
         if (not related or any(not usable_material(root, m) or 'images' not in m for m in related)
-                or attempt.get('transport_error')):
+                or attempt.get('transport_error') or attempt.get('status') == 'failed'
+                or ref in event.get('source_errors', {})):
             retry.add(ref)
     return [ref for ref in event['refs'] if ref in retry]
 
@@ -889,6 +890,9 @@ def run(batch_dir, items, initial_rows, rules, cancel):
     initial = {x['ref']: x for x in initial_rows if policy.advanced(x)}
     byref = {x['ref']: x for x in items}
     store = Store(root, len(initial))
+    previous_source_error = store.value.pop('first_source_error', None)
+    if previous_source_error:
+        store.value.setdefault('source_error_history', []).append(previous_source_error)
     store.value.update(policy_version=policy.config()['version'], policy_hash=policy.policy_hash(), event_level_initial=True)
     store.value['events'] = [event for event in store.value['events'] if event['id'] in initial]
     for event in store.value['events']:
@@ -916,7 +920,7 @@ def run(batch_dir, items, initial_rows, rules, cancel):
         pending = sorted([e for e in events if needs_review(root, e, byref)],
                          key=lambda e: e['plan']['priority'])
         prepare_reader=getattr(cancel,'prepare_original_reader',None)
-        browser_hosts={'www.toutiao.com','www.baidu.com','s.weibo.com','www.zhihu.com'}
+        browser_hosts={'www.toutiao.com','www.baidu.com','s.weibo.com','www.zhihu.com','36kr.com','www.36kr.com'}
         browser_error = None
         if prepare_reader and any(urlsplit(byref[ref].get('entry_url') or byref[ref].get('url') or '').hostname in browser_hosts
                 for e in pending for ref in sources_to_refresh(root,e,byref)):
@@ -941,18 +945,22 @@ def run(batch_dir, items, initial_rows, rules, cancel):
                                 row, material = dict(input_row, resolution_attempt={'status':'failed','error':browser_error,'transport_error':True}), []
                             else:
                                 row, material = reader(input_row, cancel)
+                            documents = material if isinstance(material, list) else [material] if material else []
                             with store.lock:
                                 byref[ref].update(row)
                                 screen.write_json(Path(batch_dir)/'items.json', items)
                                 event.setdefault('sources', {})[ref] = row
-                                for material in (material if isinstance(material,list) else [material] if material else []):
-                                    merge_material(root, event, material, ref)
+                                for document in documents:
+                                    merge_material(root, event, document, ref)
                                 if (event.get('assessment') or {}).get('basis_hash') != verification_basis(root, event, byref):
                                     invalidate_assessment(event)
                                 store.save()
                             attempt = row.get('resolution_attempt') or {}
-                            if attempt.get('transport_error'):
-                                event.setdefault('source_errors', {})[ref] = attempt.get('error') or '原帖读取中断'
+                            failed = next((d for d in documents if d.get('status') == 'failed'), None)
+                            if attempt.get('transport_error') or attempt.get('status') == 'failed' or failed is not None:
+                                detail = attempt.get('error') or (failed or {}).get('error') or '原帖读取中断'
+                                event.setdefault('source_errors', {})[ref] = detail
+                                raise RuntimeError(f'原文读取失败（{ref}）：{detail}')
                             else:
                                 event.setdefault('source_errors', {}).pop(ref, None)
                         event['originals_checked'] = not bool(event.get('source_errors'))
@@ -967,7 +975,20 @@ def run(batch_dir, items, initial_rows, rules, cancel):
                     if event.get('assessment'): event['stage'] = 'judged'
                 except Exception as exc:
                     invalidate_assessment(event)
-                    store.update(event, stage='deferred', error=str(exc)[:500], source_read_failed=True, originals_checked=False)
+                    reason = getattr(cancel, 'stop_reason', None) or str(exc)[:800]
+                    store.update(event, stage='deferred', error=reason, source_read_failed=True, originals_checked=False)
+                    if not cancel.is_set():
+                        with store.lock:
+                            store.value.setdefault('first_source_error', {
+                                'event_id': event['id'], 'ref': event.get('reading_ref'),
+                                'error': reason, 'at': screen.timestamp()})
+                            store.save()
+                        stop_all = getattr(cancel, 'stop_on_source_error', None)
+                        if stop_all:
+                            stop_all(reason)
+                        else:
+                            cancel.stop_reason = reason
+                            cancel.set()
                     policy.remaining(cancel)
                 finally:
                     event.pop('reading_ref', None)
@@ -1022,7 +1043,8 @@ def run(batch_dir, items, initial_rows, rules, cancel):
         for event in events:
             if event['plan']['selected'] and not event.get('assessment'): event['stage']='deferred'
         if cancel.is_set():
-            store.phase('stopped', error='执行已停止')
+            store.value['retryable'] = False
+            store.phase('stopped', error=getattr(cancel, 'stop_reason', None) or '执行已停止')
             return
         compare(root, events, byref, rules, cancel)
         unfinished = any(e['plan']['selected'] and not e.get('assessment') for e in events)

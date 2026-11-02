@@ -550,20 +550,11 @@ class ProductionService:
                         if job.get('next_check_at') is None:
                             self._save(job)
                             continue
-                        from . import draft_updates
-                        if draft_updates.needs_editor_recovery(self.platform,job['target']['account_id'],job.get('operation_id')):
-                            # Reopening the saved draft here would discard the
-                            # unsaved editor that recovery needs. Resume its
-                            # recorded step first; readback follows confirmed save.
-                            from .wechat_resume import context_for
-                            try:
-                                job['resume_context']=context_for(self.platform,job,self._snapshot(job))
-                            except (ValueError,OSError,KeyError):
-                                job.update(next_check_at=None,requires_user_action=True)
-                                self._record(job,'editor_preserved','原编辑页保留，当前检查点尚不能自动恢复')
-                                continue
-                            self._record(job,'scheduled_resume')
-                            self._enqueue(job['id'],'resume_draft')
+                        if job.get('external_operation') == 'sync' and job.get('operation_uncertain'):
+                            job['resume_context'] = {'operation_id': job['operation_id'], 'revision': job['revision'],
+                                'content_hash': composition.content_hash(job)}
+                            self._record(job, 'scheduled_resume')
+                            self._enqueue(job['id'], 'resume_draft')
                             continue
                         self._record(job, 'scheduled_verify')
                         self._enqueue(job['id'], 'verify')
@@ -1106,7 +1097,8 @@ class ProductionService:
                             if not editorial.approved(job): raise ValueError('当前稿件尚未通过审稿')
                             if job['stage'] not in ('ready_review','remote_verified','needs_attention'): raise ValueError('稿件尚未准备好同步')
                             if job.get('operation_uncertain') or job['status'] == 'outcome_unknown' or (job.get('remote') or {}).get('status') in ('submitted','reviewing','published','unknown','outcome_unknown'): raise ValueError('已有提交或未知结果，请先核验')
-                            if job['stage'] == 'needs_attention' and (job.get('remote') or {}).get('status') == 'saved': raise ValueError('已有平台草稿，请先核验草稿')
+                            if job['stage'] == 'needs_attention' and (job.get('remote') or {}).get('status') == 'saved' and not job['remote'].get('readback'):
+                                raise ValueError('已有平台草稿缺少完整回读，请先核验草稿')
                             account = next((a for a in self._adapter('list_accounts') if a.get('id') == job['target']['account_id']), None)
                             if not account or account.get('status') not in ('connected','needs_check') or not (account.get('identity') or {}).get('key'): raise ValueError('请先连接并核验目标账号')
                             job['approval'] = None
@@ -1150,19 +1142,8 @@ class ProductionService:
                             if (job.get('external_operation') != 'sync'
                                     or job['status'] != 'outcome_unknown' or not job.get('operation_uncertain') or job.get('approval')):
                                 raise ValueError('仅可继续尚未发布的草稿同步')
-                            if job['target']['platform'] == 'wechat':
-                                from .wechat_resume import context_for
-                                # Re-render the unchanged source document after a renderer repair;
-                                # preserve the previous operation and exact diagnostics for recovery.
-                                draft = job['draft']
-                                rendered = composition.render_body(draft['body_html'], 'wechat', draft.get('theme') or 'simple')
-                                if rendered != draft['html']:
-                                    self._record(job, 'render_recovery_before', {'html':draft['html'], 'hash':composition.content_hash(job)})
-                                    draft['html'] = rendered; job['revision'] += 1; job['approval'] = None
-                                job['resume_context'] = context_for(self.platform, job, self._snapshot(job))
-                            else:
-                                job['resume_context'] = {'operation_id':job['operation_id'],'revision':job['revision'],
-                                                         'content_hash':composition.content_hash(job)}
+                            job['resume_context'] = {'operation_id': job['operation_id'], 'revision': job['revision'],
+                                'content_hash': composition.content_hash(job)}
                             self._record(job,'resume_requested','仅定位并继续已存在的同账号草稿，禁止新建或发表')
                         elif action == 'retry':
                             if job['status'] != 'failed' or job.get('failed_stage') not in LOCAL_STAGES: raise ValueError('只能重试失败的本地阶段；平台未知结果须先核验')
@@ -1208,8 +1189,8 @@ class ProductionService:
         if not draft.get('cover_url') and any(value.get(key) for value in (remote, actual)
                 for key in ('cover_url', 'cover_media_id')): return False
         if job['target']['platform'] == 'toutiao':
-            from .toutiao_publisher import ToutiaoPublisher
-            same_cover = ToutiaoPublisher.resource_key(actual.get(cover_key)) == ToutiaoPublisher.resource_key(remote.get(cover_key))
+            from .platform_format_update import resource
+            same_cover = resource(actual.get(cover_key)) == resource(remote.get(cover_key))
         else:
             def cover_resource(url):
                 parsed = urlsplit(str(url or ''))
@@ -1342,6 +1323,9 @@ class ProductionService:
                 actual=result.get('readback') or self._adapter('inspect_draft',job['target']['account_id'],remote)
                 with self.lock:
                     if actual.get('status')!='ok': self._blocked(job,actual,'readback_blocked'); return
+                    # A recorded ID and complete readback resolve whether the
+                    # save happened, even when content still needs repair.
+                    job['operation_uncertain'] = False; job['next_check_at'] = None
                     if not self._remote_matches(job,actual):
                         self._blocked(job,{'status':'needs_attention','error':'平台草稿回读与当前稿件或账号不一致'},'readback_mismatch');return
                     job['remote'].update(verified_hash=composition.content_hash(job),fingerprint=composition.remote_fingerprint(actual),

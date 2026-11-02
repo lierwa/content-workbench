@@ -195,7 +195,7 @@ def policy_hash():
 def remaining(cancel):
     deadline = getattr(cancel, 'deadline', None)
     if cancel is not None and cancel.is_set():
-        raise RuntimeError('执行已停止')
+        raise RuntimeError(getattr(cancel, 'stop_reason', None) or '执行已停止')
     seconds = deadline - time.monotonic() if deadline is not None else 300
     if seconds <= 0:
         raise TimeoutError('本次筛选预算已用完，可继续筛选缺失部分')

@@ -399,6 +399,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self._allowed():
             return self._respond(403, {'error': '只允许本机访问'})
         path = urlsplit(self.path).path
+        if path == '/api/runtime':
+            return self._respond(200, {'root': str(ROOT), 'data': str(self.server.app.data),
+                'pid': os.getpid(), 'browser': self.server.app.platform.runtime_status()})
         if path == '/api/columns':
             try: return self._respond(200, self.server.app.columns())
             except ValueError as exc: return self._respond(409, {'error': str(exc)})
@@ -475,6 +478,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self._write_allowed():
             return self._respond(403, {'error': '请求来源无效'})
         path = urlsplit(self.path).path
+        if path == '/api/runtime/prepare':
+            return self._respond(202, self.server.app.platform.refresh_runtime())
         if path == '/api/columns':
             return self._columns_write(path, 'POST')
         if path.startswith('/api/production/'):
@@ -641,7 +646,7 @@ class Handler(BaseHTTPRequestHandler):
                 if platform not in ('wechat', 'toutiao'):
                     raise TypeError('平台无效')
                 mode = body.get('mode', 'browser')
-                if mode not in ('browser', 'profile'):
+                if mode != 'browser':
                     raise TypeError('账号连接方式无效')
                 result = service.create_account(platform, self._string(body.get('display_name'), 'display_name'), mode)
             return self._respond(200, result)

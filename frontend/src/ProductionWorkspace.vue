@@ -100,7 +100,7 @@ const stageLabels = { queued: '排队中', researching: '补充资料', writing:
 const platformLabels = { local: '本地稿', wechat: '公众号', toutiao: '今日头条' }
 const accountStatuses = { needs_login: '需要登录', starting: '正在连接', connected: '已核验', needs_check: '待核验', needs_attention: '需要处理', failed: '连接失败' }
 const capabilityLabels = { connect: '连接账号', save_draft: '同步草稿', inspect_draft: '回读草稿', publish: '发布', verify: '核验结果' }
-const accountModes = { browser: '现有浏览器专用窗口', profile: '独立浏览器资料' }
+const accountModes = { browser: '当前 Chrome 登录' }
 function status(job) {
   if (['saved','draft_verified'].includes(job.platform_save?.status) && job.editorial_approved !== true) return '草稿已存，待重审'
   if (job.stage === 'ready_review' && job.target.platform==='local' && job.editorial_approved) return '本地稿已完成'

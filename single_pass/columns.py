@@ -7,7 +7,7 @@ import re
 import uuid
 from pathlib import Path
 
-from . import collect, screen
+from . import collect, screen, screen_schedule
 
 
 def screening_template(mode):
@@ -83,6 +83,17 @@ class ColumnConfig:
         cls.number(line.get('valid_hours'), '内容有效期')
         cls.number(line.get('edition_hours'), '集合周期')
         cls.number(line.get('interval_minutes'), '筛选间隔', optional=True)
+        if 'draft_rules' in line and (not isinstance(line['draft_rules'], str) or not 1 <= len(line['draft_rules'].strip()) <= 10000):
+            raise ValueError('选稿规则须为 1 至 10000 字')
+        if 'draft_limit' in line and (type(line['draft_limit']) is not int or not 1 <= line['draft_limit'] <= 10):
+            raise ValueError('每轮自动入队上限为 1 至 10 个题')
+        if 'screen_scope' in line:
+            line['screen_scope'] = screen_schedule.normalize_scope(line['screen_scope'])
+        if 'screen_calendar' in line:
+            calendar = screen_schedule.normalize(line['screen_calendar'])
+            if calendar['mode'] not in ('daily', 'weekly') or line.get('interval_minutes') is not None:
+                raise ValueError('栏目筛选定时冲突')
+            line['screen_calendar'] = calendar
         if type(line.get('enabled', True)) is not bool or type(line.get('auto_draft', False)) is not bool:
             raise ValueError('栏目启用或自动做稿设置无效')
         domains = line.get('reference_domains', [])
@@ -109,7 +120,7 @@ class ColumnConfig:
         config = self.read()
         self.expected(config, payload.get('expected_revision'))
         allowed = {'name', 'sources', 'rules', 'screening_rules', 'max_candidates', 'writing_rules', 'format', 'mode', 'valid_hours', 'edition_hours',
-                   'reference_domains', 'interval_minutes', 'targets', 'auto_draft', 'enabled'}
+                   'reference_domains', 'interval_minutes', 'targets', 'auto_draft', 'draft_limit', 'draft_rules', 'enabled'}
         changes = payload.get('column')
         if not isinstance(changes, dict) or set(changes) - allowed:
             raise ValueError('栏目字段无效')
@@ -120,6 +131,8 @@ class ColumnConfig:
             'mode': 'hotspot', 'format': 'single', 'reference_domains': [], 'edition_hours': 24,
             'interval_minutes': None, 'targets': [], 'auto_draft': False, 'enabled': True}
         line.update(changes)
+        if changes.get('interval_minutes') is not None:
+            line.pop('screen_calendar', None)
         if isinstance(line.get('name'), str): line['name'] = line['name'].strip()
         if isinstance(line.get('rules'), str): line['rules'] = line['rules'].strip()
         if isinstance(line.get('screening_rules'), dict):
@@ -131,6 +144,35 @@ class ColumnConfig:
         config['revision'] += 1
         screen.write_json(self.path, config)
         return dict(self.snapshot(config), column=line)
+
+    def save_screen_schedule(self, payload):
+        config = self.read()
+        self.expected(config, payload.get('expected_revision'))
+        ids = payload.get('line_ids')
+        if not isinstance(ids, list) or not ids or any(not isinstance(i, str) for i in ids):
+            raise ValueError('请选择要设置的栏目')
+        lines = [line for line in config['lines'] if line['id'] in ids]
+        if len(lines) != len(ids):
+            raise ValueError('栏目已变化，请重新打开')
+        plan = screen_schedule.normalize(payload['schedule']) if 'schedule' in payload else None
+        scopes = payload.get('scopes', {})
+        if 'scopes' in payload and (not isinstance(scopes, dict) or set(scopes) != set(ids)):
+            raise ValueError('请为每个所选栏目设置筛选范围')
+        if plan is None and not scopes:
+            raise ValueError('请设置筛选范围')
+        for line in lines:
+            if not line.get('enabled', True) and (plan is None or plan['mode'] != 'off'):
+                raise ValueError(f"{line['name']}已停用")
+            if plan is not None:
+                line.pop('screen_calendar', None)
+                line['interval_minutes'] = plan.get('minutes')
+                if plan['mode'] in ('daily', 'weekly'):
+                    line['screen_calendar'] = plan
+            if scopes:
+                line['screen_scope'] = screen_schedule.normalize_scope(scopes[line['id']])
+        config['revision'] += 1
+        screen.write_json(self.path, config)
+        return lines
 
     def delete_line(self, line_id, revision):
         config = self.read()

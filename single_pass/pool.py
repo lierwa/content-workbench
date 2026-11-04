@@ -34,9 +34,12 @@ def instant(value):
 
 
 def fresh(item, line, at=None):
+    hours = line.get('_scope_hours', line['valid_hours'])
+    if hours is None:  # Explicit batch membership defines the scope of this run.
+        return True
     at = at or datetime.now(timezone.utc)
     stamp = instant(item.get('published_at')) or instant(item.get('first_seen_at'))
-    return bool(stamp and at - timedelta(hours=line.get('_scope_hours', line['valid_hours'])) <= stamp <= at)
+    return bool(stamp and at - timedelta(hours=hours) <= stamp <= at)
 
 
 def input_basis(items, line):

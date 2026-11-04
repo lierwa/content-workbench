@@ -1,5 +1,6 @@
 <script setup>
-import { RouterLink, RouterView } from 'vue-router'
+import { RouterLink, RouterView, useRoute } from 'vue-router'
+const route = useRoute()
 import Icon from './Icon.vue'
 import { isPrototype } from './api'
 </script>
@@ -11,10 +12,11 @@ import { isPrototype } from './api'
       <nav class="app-nav" aria-label="主导航">
         <RouterLink to="/columns"><Icon name="columns" />栏目</RouterLink>
         <RouterLink to="/pool"><Icon name="sources" />线索池</RouterLink>
-        <RouterLink to="/topics"><Icon name="topics" />选题</RouterLink>
-        <RouterLink to="/drafts"><Icon name="drafts" />稿件</RouterLink>
+        <RouterLink to="/topics" :class="{'router-link-active':route.path.startsWith('/topics')}"><Icon name="topics" />选题</RouterLink>
+        <RouterLink to="/drafts" :class="{'router-link-active':route.path.startsWith('/drafts')}"><Icon name="drafts" />稿件</RouterLink>
         <div class="nav-divider"></div>
         <RouterLink to="/sources"><Icon name="sources" />渠道设置</RouterLink>
+        <RouterLink to="/ai-settings"><Icon name="settings" />模型设置</RouterLink>
         <RouterLink to="/accounts"><Icon name="accounts" />账号</RouterLink>
       </nav>
     </aside>

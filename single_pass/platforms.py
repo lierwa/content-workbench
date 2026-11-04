@@ -605,8 +605,7 @@ class PlatformAdapter:
                 return self._bsk(*args, timeout=min(30,policy.remaining(cancel)))
             try:
                 tabs = json.loads(call('tab','list','--scope','agent','--session',session,'--json'))['tabs']
-                tab = str(json.loads(call('tab','create','--url','about:blank','--session',session,'--json'))['tab_id'])
-                call('navigate',entry,'--session',session,'--tab-id',tab)
+                tab = str(json.loads(call('tab','create','--url',entry,'--session',session,'--json'))['tab_id'])
                 def observe():
                     try: return call('observe','--session',session,'--tab-id',tab)
                     except _BSKError:
@@ -693,15 +692,18 @@ class PlatformAdapter:
             policy.remaining(cancel)
             session, tab = lease['session_id'], None
             try:
-                tab = str(json.loads(self._bsk('tab', 'create', '--url', 'about:blank',
+                tab = str(json.loads(self._bsk('tab', 'create', '--url', entry,
                                                '--session', session, '--json'))['tab_id'])
-                self._bsk('navigate', entry, '--session', session, '--tab-id', tab,
-                          timeout=min(30, policy.remaining(cancel)))
                 deadline = time.monotonic() + min(8, policy.remaining(cancel))
                 body_class = 'item-desc' if '/newsflashes/' in urlsplit(entry).path else 'articleDetailContent'
                 while True:
                     policy.remaining(cancel)
                     page = self._source_document(session, tab)
+                    if page['url'] in ('', 'about:blank'):
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError('36氪原文开页超时')
+                        time.sleep(.3)
+                        continue
                     if urlsplit(page['url']).hostname not in ('36kr.com', 'www.36kr.com'):
                         raise ValueError('36氪原文跳转到了其他站点，未将其作为原文')
                     text = page['tree'].text_content()
@@ -777,8 +779,9 @@ class PlatformAdapter:
             session = self._persistent_browser_session['session_id']
             def call(*args):
                 return self._bsk(*args, timeout=min(30,policy.remaining(cancel)))
-            def visit(url, tab):
-                call('navigate',url,'--session',session,'--tab-id',tab)
+            def visit(url, tab, *, opened=False):
+                if not opened:
+                    call('navigate',url,'--session',session,'--tab-id',tab)
                 obs=call('observe','--session',session,'--tab-id',tab)
                 if 'L1 modal' in obs or any(w in obs[:800] for w in ('安全验证','验证码','请先登录')):
                     raise ValueError('入口需要登录或人工验证')
@@ -787,8 +790,8 @@ class PlatformAdapter:
                 if cache is None:
                     cache={};cancel.original_cache=cache
                 tabs=json.loads(call('tab','list','--scope','agent','--session',session,'--json'))['tabs']
-                tab=str(json.loads(call('tab','create','--url','about:blank','--session',session,'--json'))['tab_id'])
-                visit(entry,tab)
+                tab=str(json.loads(call('tab','create','--url',entry,'--session',session,'--json'))['tab_id'])
+                visit(entry,tab,opened=True)
                 target=None; role='original'; evidence=[]
                 if host=='www.toutiao.com':
                     if materials.direct_post(entry):
@@ -867,9 +870,8 @@ class PlatformAdapter:
             with _BrowserProcessLock(timeout=policy.remaining(cancel)):
                 session=self._persistent_browser_session['session_id']
                 def call(*args):return self._bsk(*args,timeout=min(30,policy.remaining(cancel)))
-                tab=str(json.loads(call('tab','create','--url','about:blank','--session',session,'--json'))['tab_id'])
+                tab=str(json.loads(call('tab','create','--url',url,'--session',session,'--json'))['tab_id'])
                 try:
-                    call('navigate',url,'--session',session,'--tab-id',tab)
                     try:observation=call('observe','--session',session,'--tab-id',tab)
                     except _BSKError:
                         observation=call('observe','--session',session,'--tab-id',tab)

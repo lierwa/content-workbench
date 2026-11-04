@@ -6,6 +6,8 @@ import './style.css'
 import App from './App.vue'
 import { createRouter, createWebHashHistory } from 'vue-router'
 import Candidates from './Candidates.vue'
+import TopicRecords from './TopicRecords.vue'
+import AISettings from './AISettings.vue'
 import ProductionWorkspace from './ProductionWorkspace.vue'
 import Columns from './Columns.vue'
 import Pool from './Pool.vue'
@@ -17,7 +19,9 @@ const router = createRouter({
     { path: '/columns', component: Columns },
     { path: '/sources', component: Columns },
     { path: '/pool', component: Pool },
-    { path: '/topics', component: Candidates },
+    { path: '/topics', component: TopicRecords },
+    { path: '/topics/:recordId', component: Candidates },
+    { path: '/ai-settings', component: AISettings },
     { path: '/drafts', component: ProductionWorkspace },
     { path: '/drafts/new', component: ProductionWorkspace },
     { path: '/drafts/:id', component: ProductionWorkspace },

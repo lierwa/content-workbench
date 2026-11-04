@@ -1,30 +1,29 @@
 """One persisted collection plan shared by every UI entry point and the scheduler."""
 import copy
-import datetime as dt
 import json
-import re
-from . import collect, screen
+from . import screen, screen_schedule
 
 
 DEFAULTS = {'revision': 0, 'scope': 'all', 'line_ids': [], 'source_ids': [],
             'per_source_limit': None, 'interval_minutes': None,
-            'schedule_mode': 'manual', 'daily_time': '09:00'}
+            'schedule_mode': 'manual', 'daily_times': ['09:00']}
+
+
+def daily_times(value):
+    clocks = value.get('daily_times', [value.get('daily_time', '09:00')])
+    return screen_schedule.normalize({'mode': 'daily', 'times': clocks})['times']
 
 
 def schedule_key(value):
     mode = value['schedule_mode']
-    return (mode, value['interval_minutes'] if mode == 'interval' else value['daily_time'] if mode == 'daily' else None)
+    return (mode, value['interval_minutes'] if mode == 'interval' else daily_times(value) if mode == 'daily' else None)
 
 
 def next_run(value, after):
     """Daily times use Beijing time on every OS; missed slots are not replayed."""
     if value['schedule_mode'] == 'manual': return None
     if value['schedule_mode'] == 'interval': return after + value['interval_minutes'] * 60
-    hour, minute = map(int, value['daily_time'].split(':'))
-    now = dt.datetime.fromtimestamp(after, collect.TZ)
-    due = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if due <= now: due += dt.timedelta(days=1)
-    return due.timestamp()
+    return screen_schedule.next_at({'mode': 'daily', 'times': daily_times(value)}, after)
 
 
 class CollectionSettings:
@@ -34,6 +33,8 @@ class CollectionSettings:
     def read(self):
         saved = json.loads(self.path.read_text(encoding='utf-8')) if self.path.exists() else {}
         value = dict(copy.deepcopy(DEFAULTS), **saved)
+        value['daily_times'] = daily_times(saved)
+        value['daily_time'] = value['daily_times'][0]  # Compatibility with single-time clients.
         if 'schedule_mode' not in saved:
             value['schedule_mode'] = 'interval' if value['interval_minutes'] else 'manual'
         return value
@@ -65,16 +66,21 @@ class CollectionSettings:
         if type(body.get('expected_revision')) is not int or body['expected_revision'] != current['revision']:
             raise ValueError('采集设置已变化，请重新打开')
         value = body.get('settings')
-        if not isinstance(value, dict) or set(value) - (set(DEFAULTS) - {'revision'}):
+        if not isinstance(value, dict) or set(value) - ((set(DEFAULTS) - {'revision'}) | {'daily_time'}):
             raise ValueError('采集设置字段无效')
         mode = value.get('schedule_mode', 'interval' if value.get('interval_minutes') else 'manual')
+        # Older forms echo all fields but edit only the first clock.
+        if 'daily_time' in value and value.get('daily_times', current['daily_times']) == current['daily_times']:
+            clocks = daily_times({'daily_times': [value['daily_time'], *current['daily_times'][1:]]})
+        else:
+            clocks = daily_times(value)
         value = dict(DEFAULTS, **value, revision=current['revision'] + 1)
+        value.pop('daily_time', None)
+        value['daily_times'] = clocks
         value['schedule_mode'] = mode
         self.sources(value, config)
         if value['schedule_mode'] not in ('manual', 'interval', 'daily'):
             raise ValueError('请选择手动、按间隔或每天定时')
-        if not isinstance(value['daily_time'], str) or not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d', value['daily_time']):
-            raise ValueError('每天采集时间须为有效的 HH:mm')
         if value['schedule_mode'] != 'interval': value['interval_minutes'] = None
         elif value['interval_minutes'] is None: raise ValueError('请填写采集间隔')
         for field, maximum in (('per_source_limit', 10000), ('interval_minutes', 10080)):

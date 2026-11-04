@@ -81,6 +81,7 @@ def digest_select(root, events, items, cancel):
     return rows
 
 
+@review.correct_invalid_output
 def digest_assess(root, events, items, rules, cancel):
     readable = [e for e in events if any(m.get('content') for m in e['materials'] if m.get('status') == 'read')]
     checked = {}
@@ -206,7 +207,7 @@ def execute(root, database, line, cancel, records):
             if not pending and len(previous_runs)==1:
                 prior_path=root.parent/next(iter(previous_runs))/'review'/'state.json'
                 if prior_path.exists(): prior_state=json.loads(prior_path.read_text(encoding='utf-8'))
-            selection_hash=policy.digest(review.selection_prompt([],line))
+            selection_hash=review.selection_hash(line)
             if (prior_state and {r for e in prior_state['events'] for r in e['refs']}==set(byref)
                     and prior_state.get('selection_prompt_hash')==selection_hash):
                 store.value['selection_prompt_hash']=selection_hash

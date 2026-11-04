@@ -222,7 +222,16 @@ def parse_material(page, final_url, entry=False):
             if urllib.parse.urlsplit(url).scheme in ('http', 'https') and url != final_url and not any(i['url'] == url for i in images):
                 images.append({'url': url, 'description': graphic.get('alt') or graphic.get('title') or '',
                                'source_url': final_url})
-    return {'final_url': final_url, 'title': getattr(metadata, 'title', None),
+    # Anchor and its surrounding passage must actually appear in the extracted
+    # article. Site menus and recommended-story lists are not evidence leads.
+    article_links = []
+    for anchor in image_page.xpath('//p/a[@href]'):
+        label = anchor.text_content().strip()
+        passage = anchor.getparent().text_content().strip()
+        link = urllib.parse.urljoin(final_url, anchor.get('href'))
+        if label and verify_quote(text, passage) and urllib.parse.urlsplit(link).scheme in ('http', 'https'):
+            article_links.append({'title':label, 'url':link})
+    return {'article_links':article_links, 'final_url': final_url, 'title': getattr(metadata, 'title', None),
             'links': list(dict.fromkeys(links.urls)),
             'images': images, 'images_version': IMAGES_VERSION,
             'publisher': getattr(metadata, 'sitename', None), 'author': getattr(metadata, 'author', None),

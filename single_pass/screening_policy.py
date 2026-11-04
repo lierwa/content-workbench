@@ -32,7 +32,7 @@ def selection_limit(line):
 
 def stage_hash(line, stage):
     line = line or {}
-    return digest({'contract':'column-stages-1','mode':line.get('mode','hotspot'),
+    return digest({'contract': 'compact-3' if stage in ('selection','initial') else 'column-stages-1','mode':line.get('mode','hotspot'),
         'scope':line.get('rules',''),'stage':stage,'rules':stage_rules(line,stage),
         **({'max_candidates':selection_limit(line)} if stage=='selection' else {})})
 
@@ -107,7 +107,8 @@ def outcome(stage, value, inputs):
     """Validate provenance and explicit decisions; never infer quality from a score."""
     from .screen import timestamp
     import jsonschema
-    jsonschema.validate(value.get('dimensions'), dimensions_schema(stage))
+    if value.get('dimensions') or stage == 'verification' or (stage == 'initial' and value['decision'] == 'advance'):
+        jsonschema.validate(value.get('dimensions'), dimensions_schema(stage))
     for entry in value['dimensions'].values():
         if not entry['judgment'].strip(): raise ValueError('本轮判断维度缺少具体说明')
     dimension_quotes = dimension_evidence(value)
@@ -143,6 +144,11 @@ def line_basis(line):
     value = dict(line, interval_minutes=None, targets=[], auto_draft=False)
     value['screening_rules']={stage:stage_rules(line,stage) for stage in ('initial','selection','verification')}
     value['max_candidates']=selection_limit(line)
+    value.pop('draft_rules', None)
+    value.pop('draft_limit', None)
+    value.pop('draft_wait_minutes', None)
+    value.pop('screen_calendar', None)
+    value.pop('screen_scope', None)
     value.pop('enabled', None)
     value.pop('writing_rules', None)
     value.pop('_scope_hours', None)
@@ -187,7 +193,7 @@ def freshness_refs(value):
 def policy_hash():
     root = Path(__file__).parent
     rules = config()
-    for key in ('full_batch_enabled', 'budget_seconds', 'retries', 'max_model_calls_per_run', 'reader_version'):
+    for key in ('full_batch_enabled', 'budget_seconds', 'retries', 'max_model_calls_per_run', 'reader_version', 'stage_models', 'writer_models'):
         rules.pop(key, None)
     return digest([rules, (root.parent / 'docs' / '筛选规则.md').read_text(encoding='utf-8')])
 

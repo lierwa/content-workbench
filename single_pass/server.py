@@ -402,6 +402,17 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/runtime':
             return self._respond(200, {'root': str(ROOT), 'data': str(self.server.app.data),
                 'pid': os.getpid(), 'browser': self.server.app.platform.runtime_status()})
+        if path in ('/api/topic-records', '/api/session-trace', '/api/ai-settings') or path.startswith('/api/topic-records/'):
+            try:
+                from . import ai_settings
+                query = {k:v[0] for k,v in parse_qs(urlsplit(self.path).query).items()}
+                if path == '/api/ai-settings': result = ai_settings.view(self.server.app.data)
+                elif path == '/api/session-trace': result = self.server.app.session_trace(query)
+                elif path == '/api/topic-records': result = self.server.app.topic_records(query)
+                else: result = self.server.app.topic_record(unquote(path[len('/api/topic-records/'):]))
+                return self._respond(200, result)
+            except (ValueError, TypeError) as exc:
+                return self._respond(404, {'error': str(exc)})
         if path == '/api/columns':
             try: return self._respond(200, self.server.app.columns())
             except ValueError as exc: return self._respond(409, {'error': str(exc)})
@@ -412,6 +423,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/screen/options':
             try: return self._respond(200, self.server.app.screening_options())
             except ValueError as exc: return self._respond(409, {'error': str(exc)})
+        if path == '/api/collection/history':
+            try:
+                page = parse_qs(urlsplit(self.path).query).get('page', ['1'])[0]
+                return self._respond(200, self.server.app.collection_history(page))
+            except ValueError as exc: return self._respond(400, {'error': str(exc)})
         if path == '/api/screen/process':
             try:
                 batch_id = parse_qs(urlsplit(self.path).query).get('batch_id', [None])[0]
@@ -486,19 +502,29 @@ class Handler(BaseHTTPRequestHandler):
             return self._production_write(path, 'POST')
         if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
             return self._respond(415, {'error': '需要 JSON 请求'})
-        if path not in ('/api/collect', '/api/collection/settings', '/api/screen', '/api/screen/batch', '/api/screen/preview', '/api/screen/start', '/api/stop', '/api/rank'):
+        if path not in ('/api/ai-settings', '/api/topics/draft-prompt', '/api/topics/automation', '/api/collect', '/api/collection/settings', '/api/screen', '/api/screen/batch', '/api/screen/schedule', '/api/screen/preview', '/api/screen/start', '/api/stop', '/api/rank'):
             return self._respond(404, {'error': '接口不存在'})
         try:
             size = int(self.headers.get('Content-Length', '0'))
-            if size < 0 or size > 65536:
+            maximum = 256000 if path == '/api/topics/draft-prompt' else 65536
+            if size < 0 or size > maximum:
                 raise ValueError('请求内容过大')
             body = json.loads(self.rfile.read(size) or b'{}')
             if not isinstance(body, dict):
                 raise ValueError('请求格式无效')
-            if path == '/api/collect':
+            if path == '/api/ai-settings':
+                from . import ai_settings
+                result = ai_settings.save(self.server.app.data, body)
+            elif path == '/api/collect':
                 result = self.server.app.start_collection_plan(body)
+            elif path == '/api/topics/draft-prompt':
+                result = self.server.app.draft_selection.prompt_settings(body)
+            elif path == '/api/topics/automation':
+                result = self.server.app.edit_draft_selection(body)
             elif path == '/api/collection/settings':
                 result = self.server.app.save_collection_settings(body)
+            elif path == '/api/screen/schedule':
+                result = self.server.app.save_screen_schedule(body)
             elif path == '/api/screen/preview':
                 result = self.server.app.preview_screening(body)
             elif path == '/api/screen/start':

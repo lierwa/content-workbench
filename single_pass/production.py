@@ -5,13 +5,14 @@ import html
 import json
 import shutil
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import composition, screen, editorial, cover_assets, typesetting, article_images, screening_policy as policy
+from . import composition, screen, review, editorial, cover_assets, typesetting, article_images, screening_policy as policy
 from .platforms import BrowserBusyError
 
 
@@ -213,10 +214,10 @@ class ProductionService:
         cleaned = composition.sanitize_body(body_html)
         return {'html':composition.render_body(cleaned, platform, theme, presentation_mode)}
 
-    def create_jobs(self, batch_id, event_ids, targets, expected_versions=None, automatic=False):
+    def create_jobs(self, batch_id, event_ids, targets, expected_versions=None, automatic=False, draft_decisions=None):
         screen.check_runtime()
         with self.creation_lock:
-            return self._create_jobs(batch_id, event_ids, targets, expected_versions, automatic)
+            return self._create_jobs(batch_id, event_ids, targets, expected_versions, automatic, draft_decisions)
 
     def create_batch(self, selections, targets):
         if not isinstance(selections, list) or not selections or len(selections) > 100:
@@ -234,7 +235,7 @@ class ProductionService:
                                 'error': str(exc)})
         return {'results': results}
 
-    def _create_jobs(self, batch_id, event_ids, targets, expected_versions=None, automatic=False):
+    def _create_jobs(self, batch_id, event_ids, targets, expected_versions=None, automatic=False, draft_decisions=None):
         if not isinstance(event_ids, list) or not isinstance(targets, list):
             raise ValueError('需要选题和目标账号列表')
         if not event_ids or any(not isinstance(x, str) or not x for x in event_ids):
@@ -303,6 +304,10 @@ class ProductionService:
                             and (automatic or [(e['id'], e['version']) for e in j['packet'].get('entries', [])]
                                  == [(e['id'], e['version']) for e in event['entries']])), None)
                     if existing:
+                        if automatic and existing['status'] == 'cancelled':
+                            raise ValueError('该题的制作任务已取消，请手动决定是否重做')
+                        if automatic and line.get('format') == 'digest' and existing['event_id'] != event_id:
+                            raise ValueError('本期已有其他集合稿，请在稿件中查看')
                         if existing['status'] == 'cancelled' and not automatic:
                             if existing['id'] in self.running:
                                 raise ValueError('原任务正在停止，请稍后重新加入队列')
@@ -344,6 +349,11 @@ class ProductionService:
                         if line.get('writing_rules', '').strip():
                             packet['account_guidance'] = '本栏目创作要求：\n' + line['writing_rules'].strip() + (
                                 '\n\n所选账号约束：\n' + packet['account_guidance'] if packet['account_guidance'] else '')
+                        if draft_decisions:
+                            members = [e['id'] for e in packet['entries']] or [event_id]
+                            packet['draft_decisions'] = {i: draft_decisions[i] for i in members}
+                            directions = [f"{v['title']}（{v['use']}）：{v['reason']}" for v in packet['draft_decisions'].values()]
+                            packet['account_guidance'] += '\n选稿判断（搬运按已核实来源署名转述）：\n' + '\n'.join(directions)
                         editorial.require_original({'packet':packet})
                         job = {'id':job_id, 'batch_id':batch_id, 'event_id':event_id, 'source_title':ref_items[0].get('title') or '', 'target':target,
                             'adoption_predecessors': predecessors,
@@ -357,6 +367,9 @@ class ProductionService:
                         identity = work_identity(job)
                         job['work_id'] = next((j['work_id'] for j in self.jobs.values()
                                                if work_identity(j) == identity), identity)
+                        from . import ai_settings
+                        snapshot = ai_settings.freeze(self.jobs_dir / job_id, self.root.parent)
+                        job['editorial_ai_key'] = ai_settings.cache_key(snapshot, ('writer', 'reviewer', 'research'))
                         self.jobs[job_id] = job
                         self._record(job, 'created')
                         self._enqueue(job_id, 'compose')
@@ -535,6 +548,13 @@ class ProductionService:
                 if self.browser_session_transition: continue
                 now = datetime.now(timezone.utc)
                 for job in self.jobs.values():
+                    retry = job.get('local_retry')
+                    if (job['status'] == 'retry_wait' and retry and retry['due'] <= time.time()
+                            and job['id'] not in self.running and not job.get('operation_uncertain')):
+                        job.update(status='queued', error=None)
+                        self._record(job, 'retry', {'reason':'本地临时错误自动续跑','attempt':retry['attempt']})
+                        self._enqueue(job['id'], retry['operation'])
+                        continue
                     pending = job.get('pending_operation')
                     if pending in ('sync','publish','verify') and job['id'] not in self.running:
                         if self._account_key(job) is not None:
@@ -561,9 +581,14 @@ class ProductionService:
 
     def _worker(self, job_id, operation, cancel):
         try:
+            from . import ai_settings
+            cancel.job_id = job_id
+            cancel.ai_call_owner_root = self.jobs_dir / job_id
+            cancel.ai_settings_snapshot = ai_settings.freeze(self.jobs_dir / job_id, self.root.parent)
             with self.lock:
                 job = self.jobs[job_id]
                 if cancel.is_set() or job['status'] == 'cancelled': return
+                job['editorial_ai_key'] = ai_settings.cache_key(cancel.ai_settings_snapshot, ('writer', 'reviewer', 'research'))
                 if operation != 'verify' and job.get('changed_source_refs'):
                     raise ValueError('来源已变化，先重新选稿并核实受影响消息')
                 if operation in ('compose', 'sync', 'resume_draft', 'publish') and job['packet'].get('line'):
@@ -610,6 +635,16 @@ class ProductionService:
                     job['next_check_at'] = None; self._record(job, 'verify_failed', job['error']); return
                 if operation == 'verify' and job['status'] in ('submitted','reviewing') and not job.get('operation_uncertain'):
                     job['error'] = str(exc)[:1000]; self._schedule_check(job); self._record(job, 'verify_failed', job['error']); return
+                if (operation in ('compose','reformat','review','images') and not job.get('operation_uncertain')
+                        and not cancel.is_set() and isinstance(exc, (review.TemporaryModelError, TimeoutError, ConnectionError))):
+                    last = job.get('local_retry') or {}
+                    count = last.get('attempt', 0) if last.get('revision') == job['revision'] else 0
+                    if count < 2:
+                        job.update(status='retry_wait', error=str(exc)[:1000],
+                                   local_retry={'attempt':count+1,'due':time.time()+30*(count+1),
+                                                'operation':operation,'revision':job['revision']})
+                        self._record(job, 'local_retry_scheduled', job['local_retry'])
+                        return
                 uncertain = previous in EXTERNAL_STAGES or job.get('operation_uncertain', False)
                 if uncertain:
                     job['operation_uncertain'] = True; self._schedule_check(job)
@@ -655,7 +690,7 @@ class ProductionService:
             gate = self.editorial_locks.setdefault(key, threading.Lock())
             attempt_key = (key, job['revision'], job['stage'], editorial.source_hash(job), editorial.standard_hash(),
                 editorial.text_fingerprint(job['draft'].get('title') or '', job['draft'].get('body_html') or ''),
-                job.get('shared_title_max'), job['packet'].get('account_guidance'))
+                job.get('shared_title_max'), job['packet'].get('account_guidance'), job.get('editorial_ai_key'))
             if job.get('last_action') == 'retry': self.composition_failures.pop(attempt_key, None)
         with gate:
             with self.lock:
@@ -665,6 +700,7 @@ class ProductionService:
                 donor = next((other for other in self.jobs.values() if other['id'] != job_id
                     and other.get('creation_id') == job.get('creation_id') and job.get('creation_id')
                     and other['event_id'] == job['event_id']
+                    and other.get('editorial_ai_key') == job.get('editorial_ai_key')
                     and other.get('cover_search_version') == cover_assets.SEARCH_VERSION
                     and any(editorial.reusable(other.get('editorial_review') or {}, job, candidate)
                         for candidate in (other.get('draft'), other.get('edited')) if candidate)
@@ -689,7 +725,8 @@ class ProductionService:
                     job['stage'] = 'formatting'
                     self._record(job, 'shared_editorial_reused', {'from_job':donor['id']})
             try:
-                self._compose_locked(job_id, cancel)
+                while self._compose_locked(job_id, cancel):
+                    if cancel.is_set(): return
             except Exception as exc:
                 with self.lock: self.composition_failures[attempt_key] = str(exc)
                 raise
@@ -727,38 +764,59 @@ class ProductionService:
                     job['cover_candidates'] = view['cover_candidates']; job['cover_search_version'] = cover_assets.SEARCH_VERSION
                     job['packet']['materials'] = copy.deepcopy(view['packet']['materials'])
                     self._record(job, 'image_preparation', {'candidates': len(view['cover_candidates']), 'issues': issues})
-            # A second, independent session judges the draft. One targeted repair
-            # and one re-review are allowed; there is no unbounded rewrite loop.
-            current = view.get('draft') or {}
-            cached = view.get('editorial_review') or {}
-            if not (cached.get('decision') in ('revise','insufficient')
-                    and editorial.reusable(cached, view, current)
-                    and current.get('markdown') == candidate.get('markdown')
-                    and current.get('title') == candidate.get('title')):
-                cached = None
-            for attempt in range(2):
-                # Text review is independent of whether an illustration exists.
-                candidate['body_html'] = composition.platform_body(
-                    composition.strip_repeated_title(candidate['markdown'],candidate['title']))
-                verdict = copy.deepcopy(cached) if attempt == 0 and cached else editorial.inspect(call_root, view, candidate, cancel)
+            # Persist each repaired manuscript before paying for its independent
+            # review. Restarting editing resumes that exact manuscript and budget.
+            repairs = view.get('editorial_repairs', 0)
+            formatted = view.get('repair_formatted_draft') and view.get('draft')
+            while True:
+                if formatted:
+                    # The issue was located on the rendered version, whose
+                    # paragraph boundaries may differ from the writer's source.
+                    candidate = dict(candidate, title=formatted['title'], body_html=formatted['body_html'],
+                                     markdown=formatted.get('markdown') or candidate['markdown'])
+                    formatted = None
+                else:
+                    candidate['body_html'] = composition.platform_body(
+                        composition.strip_repeated_title(candidate['markdown'], candidate['title']))
+                cached = view.get('editorial_review') or {}
+                if editorial.reusable(cached, view, candidate):
+                    verdict = cached
+                else:
+                    verdict = editorial.inspect(call_root, view, candidate, cancel)
+                    with self.lock:
+                        if cancel.is_set(): return
+                        job['editorial_review'] = verdict
+                        self._record(job, 'editorial_review', {'round': repairs + 1, **verdict})
+                if verdict['passed'] or repairs >= 3:
+                    break
+                if verdict['decision'] == 'insufficient':
+                    if view.get('supplement_attempted'):
+                        break
+                    additions, detail = composition.supplement(call_root, view['packet'], verdict['issues'], cancel)
+                    with self.lock:
+                        if cancel.is_set(): return
+                        job['packet']['materials'].extend(additions)
+                        job['supplement_attempted'] = view['supplement_attempted'] = True
+                        view['packet'] = copy.deepcopy(job['packet'])
+                        self._record(job, 'evidence_supplement', detail)
+                    if not additions:
+                        break
+                repair = dict(view, revision_candidate=candidate, review_issues=verdict['issues'])
+                candidate = composition.edit(call_root, repair, cancel, proof_required=False)
+                repairs += 1
                 with self.lock:
                     if cancel.is_set(): return
-                    job['editorial_review'] = verdict
-                    self._record(job, 'editorial_review', {'round': attempt + 1, 'reused':bool(attempt == 0 and cached), **verdict})
-                if verdict['passed']:
-                    break
-                if verdict.get('decision') == 'insufficient':
-                    break  # Missing evidence cannot be repaired by rewriting prose.
-                if attempt == 1:
-                    break
-                repair = copy.deepcopy(view)
-                repair['revision_candidate'] = candidate
-                repair['review_issues'] = verdict['issues']
-                candidate = composition.edit(call_root, repair, cancel, proof_required=False)
+                    job['edited'] = candidate
+                    job.pop('repair_formatted_draft', None)
+                    job['editorial_repairs'] = repairs
+                    self._record(job, 'editorial_repair', {'round':repairs})
+                view.pop('editorial_review', None)
+                view.pop('repair_formatted_draft', None)
             value = dict(candidate, fact_checks=verdict['fact_checks'],
                          editorial_notes=candidate.get('editorial_notes', []), unresolved=candidate.get('unresolved', []))
             with self.lock:
                 if cancel.is_set(): return
+                job.pop('repair_formatted_draft', None)
                 job['edited'] = value; self._phase(job, 'formatting')
             stage = 'formatting'
         if stage == 'formatting':
@@ -767,6 +825,7 @@ class ProductionService:
             review_passed = (job.get('editorial_review') or {}).get('passed') is True and (job.get('editorial_review') or {}).get('decision') == 'pass'
             markdown = composition.strip_repeated_title(edited['markdown'],edited['title'])
             plain_body = composition.platform_body(markdown)
+            reviewed_draft = {'title':edited['title'], 'body_html':plain_body}
             bundle = {'cover_url': None, 'cover_sha256': None, 'cover_kind': None,
                       'cover_source': None, 'body_image_hashes': {}, 'image_plan': None}
             if review_passed:
@@ -786,9 +845,6 @@ class ProductionService:
                 sources = [{k:m.get(k) for k in ('url','final_url','title','publisher','published_at','content_sha256')} for m in job['packet']['materials'] if m.get('status') == 'read']
                 markdown = composition.strip_repeated_title(edited['markdown'],edited['title'])
                 theme = (job.get('draft') or {}).get('theme') or 'simple'
-                verdict = job.get('editorial_review') or {}
-                if verdict.get('text_hash') == editorial.text_fingerprint(edited['title'],plain_body):
-                    verdict['text_hash'] = editorial.text_fingerprint(edited['title'],body)
                 job['layout_plan'] = layout
                 job['image_plan'] = bundle['image_plan']
                 mode = previous.get('presentation_mode') or ('toutiao_native' if job['target']['platform']=='toutiao' else None)
@@ -797,23 +853,27 @@ class ProductionService:
                     'work_statements':previous.get('work_statements'), 'first_publish':previous.get('first_publish'), 'original':previous.get('original'),
                     **cover, 'sources':sources, 'title_review':title_review, 'editorial_notes':edited['editorial_notes'], 'fact_checks':edited['fact_checks'], 'unresolved':edited['unresolved'],
                     'fact_check_scope':'系统确认所列断言及原文摘录分别存在，关联和正文覆盖由模型判断，仍需审稿核对，不能证明所有事实已核实。'}
-                job.update(stage='ready_review', status='ready_review', error=None)
-                if not review_passed:
-                    job.update(stage='needs_attention', status='needs_attention',
-                        error=editorial.summary(job['editorial_review']))
                 if review_passed:
                     self._record(job, 'images_prepared', bundle['image_plan'])
-                self._record(job, job['stage'])
-            # Only changed article text needs another review; image availability
-            # and the renderer's stock-photo label do not change that text.
-            if cover['cover_url'] and (job.get('editorial_review') or {}).get('passed') and not editorial.approved(job):
-                verdict = editorial.inspect(call_root, copy.deepcopy(job), copy.deepcopy(job['draft']), cancel)
+            if review_passed and not editorial.approved(job):
+                carried = editorial.carry_layout_verdict(job, reviewed_draft, job['draft'])
+                verdict = carried or editorial.inspect(call_root, copy.deepcopy(job), copy.deepcopy(job['draft']), cancel)
                 with self.lock:
+                    if cancel.is_set(): return
                     job['editorial_review'] = verdict
-                    if not verdict['passed']:
-                        job.update(stage='needs_attention',status='needs_attention',error=editorial.summary(verdict))
-                    self._record(job,'editorial_review',verdict)
+                    if not verdict['passed'] and job.get('editorial_repairs', 0) < 3:
+                        job.update(stage='editing', status='running', repair_formatted_draft=True)
+                        self._record(job, 'editorial_review', verdict)
+                        return True
+                    self._record(job, 'layout_review_reused' if carried else 'editorial_review', verdict)
             with self.lock:
+                if cancel.is_set(): return
+                if editorial.approved(job):
+                    job.update(stage='ready_review', status='ready_review', error=None)
+                else:
+                    job.update(stage='needs_attention', status='needs_attention',
+                               error=editorial.summary(job['editorial_review']))
+                self._record(job, job['stage'])
                 job['shared_draft_hash'] = composition.content_hash(job)
                 self._save(job)
 
@@ -908,7 +968,8 @@ class ProductionService:
             self._record(job, 'images_prepared', {'changed': changed, **bundle['image_plan']})
 
     def _typeset(self, job_id, body, cancel):
-        digest=typesetting.key(body)
+        from . import ai_settings
+        digest=policy.digest([typesetting.key(body), ai_settings.cache_key(getattr(cancel, 'ai_settings_snapshot', None), ('layout',))])
         with self.lock: gate=self.editorial_locks.setdefault(('layout',digest),threading.Lock())
         with gate:
             folder=self.root/'layouts';folder.mkdir(exist_ok=True)
@@ -1161,6 +1222,9 @@ class ProductionService:
                                         and job['draft'].get('markdown')):
                                     composition.require_rewritable_body(body)
                                 job['draft']['body_html'] = body; job['draft']['content_format'] = 'richtext'
+                            if part in ('writing','editing'):
+                                job.pop('editorial_repairs', None)
+                                job.pop('supplement_attempted', None)
                             job['revision'] += 1; job['approval'] = None
                             if job['remote']: job['remote']['verified_hash'] = None
                             job['local_operation'] = 'reformat' if part == 'formatting' else 'compose'

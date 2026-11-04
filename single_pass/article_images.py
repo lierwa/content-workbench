@@ -89,6 +89,7 @@ def _choices(media_dir, job_id, sources, issues):
     return result
 
 
+@review.correct_invalid_output
 def _visual_plan(folder, job, body, choices, related, media_dir, cancel):
     tree = lhtml.fragment_fromstring(body, create_parent='section')
     paragraphs = [n.text_content().strip() for n in _blocks(tree)]
@@ -105,7 +106,7 @@ def _visual_plan(folder, job, body, choices, related, media_dir, cancel):
         'paragraphs': list(enumerate(paragraphs)),
         'sources': [{k: m.get(k) for k in ('material_id', 'title', 'url', 'content')}
                     for m in job['packet']['materials'] if m.get('status') == 'read'],
-        'related_reports': related,
+        'related_reports': [{k:m.get(k) for k in ('material_id','title','publisher','published_at','url','final_url','content')} for m in related],
         'candidates': [{k: c.get(k) for k in ('id', 'source', 'title', 'description', 'material_id', 'role')}
                        for c in choices]}
     result = composition._model(folder, 'article-image-selection', schema,
@@ -183,9 +184,11 @@ def _related(folder, job, cancel):
 
 def prepare(root, media_dir, job, body, cancel):
     """Return an atomic cover/body bundle; cache is shared by platform jobs."""
+    from . import ai_settings
     manifest, _ = fallback_manifest()
     body = clean_body(body)
     basis = {'version': VERSION, 'search_version': cover_assets.SEARCH_VERSION,
+             'ai_config': ai_settings.cache_key(getattr(cancel, 'ai_settings_snapshot', None), ('images',)),
              'images_version': materials.IMAGES_VERSION, 'fallback_sha256': manifest['sha256'],
              'text_hash': editorial.text_fingerprint(job['draft'].get('title') or job['edited']['title'], body),
              'materials': [(m.get('material_id'), m.get('content_sha256'), m.get('status')) for m in job['packet']['materials']]}
@@ -209,9 +212,12 @@ def prepare(root, media_dir, job, body, cancel):
                 issues.extend({'stage': 'related_read', 'url': m.get('url'), 'error': m.get('error')}
                               for m in reports if m.get('status') != 'read')
                 extra = _choices(media_dir, job['id'], readable, issues)
+                old_ids = {c['id'] for c in choices}
+                extra = [c for c in extra if c['id'] not in old_ids]
                 if extra:
-                    old_ids = {c['id'] for c in choices}
-                    choices += [c for c in extra if c['id'] not in old_ids]
+                    choices += extra
+                    contributing = {c['material_id'] for c in extra}
+                    readable = [m for m in readable if m['material_id'] in contributing]
                     plan = _visual_plan(folder, job, body, choices, readable, media_dir, cancel)
             plan = plan or {'cover_id': '', 'cover_reason': '原帖及同事件报道均无可用图片', 'body_images': [], 'relations': []}
             saved = {'key': key, 'basis': basis, 'selection': plan, 'search': search, 'issues': issues,

@@ -2,7 +2,7 @@
 import json
 import math
 from datetime import datetime, timedelta, timezone
-from . import pool, screening_policy as policy
+from . import pool, screen_schedule, screening_policy as policy
 
 TERMINAL = {'judged', 'drop', 'insufficient', 'not_selected'}
 
@@ -15,9 +15,11 @@ def processed(record, item, line):
 
 def bounds(spec, line, now):
     mode = spec.get('mode', 'time')
-    if mode not in ('time', 'batches'): raise ValueError('取数方式无效')
+    if mode == 'batches':
+        return screen_schedule.normalize_scope(spec)
+    if mode != 'time': raise ValueError('取数方式无效')
     hours = spec.get('hours', line['valid_hours'])
-    if mode == 'time' and hours == 'custom':
+    if hours == 'custom':
         start, end = pool.instant(spec.get('start')), pool.instant(spec.get('end'))
         if not start or not end or start >= end or end > now + timedelta(seconds=5):
             raise ValueError('请选择有效时间区间，结束时间不能晚于现在')
@@ -26,7 +28,20 @@ def bounds(spec, line, now):
         if type(hours) is not int or not 1 <= hours <= 8760: raise ValueError('时间范围须为 1–8760 小时')
         start, end, effective_hours = now - timedelta(hours=hours), now, hours
     return dict(mode=mode, hours=hours, start=start.isoformat(), end=end.isoformat(),
-                effective_hours=effective_hours, batch_ids=spec.get('batch_ids', []) if mode == 'batches' else [])
+                effective_hours=effective_hours, batch_ids=[])
+
+
+def scheduled_spec(workspace, line):
+    scope = screen_schedule.scope_for_line(line)
+    if 'mode' in scope:
+        return dict(scope, line_id=line['id'])
+    if scope['unit'] == 'hours':
+        return {'line_id': line['id'], 'hours': scope['count']}
+    batches = workspace.collection_batches(line['sources'])
+    ids = [batch['id'] for batch in batches if batch['selectable']][:scope['count']]
+    if not ids:
+        raise ValueError('本栏目暂无可用于定时筛选的采集批次')
+    return {'line_id': line['id'], 'mode': 'batches', 'batch_ids': ids}
 
 
 def resolve(workspace, spec, now=None):
@@ -37,9 +52,7 @@ def resolve(workspace, spec, now=None):
     scope = bounds(spec, line, now)
     batch_ids = scope['batch_ids']
     if scope['mode'] == 'batches':
-        if not isinstance(batch_ids, list) or not batch_ids or any(not isinstance(v, str) for v in batch_ids):
-            raise ValueError('请选择采集批次')
-        known = {b['id']: b for b in workspace.screening_options()['batches']}
+        known = {b['id']: b for b in workspace.collection_batches()}
         if any(b not in known or not known[b]['selectable'] for b in batch_ids):
             raise ValueError('采集批次未结束或缺少完整明细，不能用于本轮筛选')
     with workspace.database.connect() as db:
@@ -63,18 +76,22 @@ def resolve(workspace, spec, now=None):
             path = workspace.data / run / 'review' / 'state.json'
             policy_by_run[run] = json.loads(path.read_text(encoding='utf-8')).get('policy_hash') if path.exists() else None
         record['policy_hash'] = policy_by_run[run]
-    occupied = workspace.production.occupied_inputs(line) if workspace.production else set()
-    start, end = pool.instant(scope['start']), pool.instant(scope['end'])
+    occupied_line = dict(line, _scope_hours=None) if batch_ids else line
+    occupied = workspace.production.occupied_inputs(occupied_line) if workspace.production else set()
+    start, end = pool.instant(scope.get('start')), pool.instant(scope.get('end'))
     eligible, excluded = [], []
     for item in values:
         stamp = pool.instant(item.get('published_at')) or pool.instant(item.get('first_seen_at'))
         reason = ('批次中的内容已有新版本' if batch_ids and item['version'] not in versions.get(item['ref'], set()) else
-                  '不在时间范围内' if not stamp or not start <= stamp <= end else
+                  '不在时间范围内' if not batch_ids and (not stamp or not start <= stamp <= end) else
                   '制作中或已采用' if (item['ref'], item['version']) in occupied else
                   '已处理，内容未变化' if processed(records.get(item['ref']), item, line) else None)
         if reason: excluded.append(dict(item, exclusion=reason))
         else: eligible.append(item)
-    eligible.sort(key=lambda i: ((pool.instant(i.get('published_at')) or pool.instant(i.get('first_seen_at'))).timestamp(), i['ref']), reverse=True)
+    def order(item):
+        stamp = pool.instant(item.get('published_at')) or pool.instant(item.get('first_seen_at'))
+        return (stamp or datetime.min.replace(tzinfo=timezone.utc), item['ref'])
+    eligible.sort(key=order, reverse=True)
     return dict(line=line, scope=scope, items=eligible, remaining=[], excluded=excluded,
                 records=records, config_hash=policy.line_hash(line), policy_hash=policy.policy_hash())
 

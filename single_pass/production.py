@@ -12,7 +12,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import composition, screen, review, editorial, cover_assets, typesetting, article_images, screening_policy as policy
+from . import composition, screen, review, editorial, cover_assets, typesetting, article_images, column_policy, screening_policy as policy
 from .platforms import BrowserBusyError
 
 
@@ -171,6 +171,29 @@ class ProductionService:
     def create_account(self, platform, display_name, mode='browser'):
         return self._adapter('create_account', platform, display_name, mode)
 
+    def topic_progress(self, batch_id, event_id=None, version=None):
+        """Join both manual and automatic selections to durable production records."""
+        with self.lock:
+            rows = []
+            for job in self.jobs.values():
+                if job['batch_id'] != batch_id:
+                    continue
+                entries = job['packet'].get('entries') or []
+                if event_id and not (job['event_id'] == event_id or any(
+                        e['id'] == event_id and (version is None or e.get('version') == version) for e in entries)):
+                    continue
+                state = job['status']
+                label = {'queued':'排队中', 'running':'制作中', 'retry_wait':'等待重试',
+                         'ready_review':'已成稿', 'remote_verified':'草稿已核验',
+                         'published':'已发布', 'submitted':'平台处理中', 'reviewing':'平台审核中',
+                         'cancelled':'已取消', 'failed':'制作失败', 'needs_attention':'需处理',
+                         'outcome_unknown':'待核验'}.get(state, '处理中')
+                rows.append({'id':job['id'], 'work_id':job['work_id'], 'status':state,
+                             'label':label, 'platform':job['target']['platform'], 'error':job.get('error')})
+            return {'jobs':rows, 'label':' / '.join(dict.fromkeys(r['label'] for r in rows)),
+                    'work_count':len({r['work_id'] for r in rows}),
+                    'occupied':any(r['status'] != 'cancelled' for r in rows)}
+
     def source_documents(self, job_id):
         with self.lock:
             if job_id not in self.jobs: raise ValueError('稿件不存在')
@@ -214,10 +237,10 @@ class ProductionService:
         cleaned = composition.sanitize_body(body_html)
         return {'html':composition.render_body(cleaned, platform, theme, presentation_mode)}
 
-    def create_jobs(self, batch_id, event_ids, targets, expected_versions=None, automatic=False, draft_decisions=None):
+    def create_jobs(self, batch_id, event_ids, targets, expected_versions=None, automatic=False, draft_decisions=None, line_snapshot=None):
         screen.check_runtime()
         with self.creation_lock:
-            return self._create_jobs(batch_id, event_ids, targets, expected_versions, automatic, draft_decisions)
+            return self._create_jobs(batch_id, event_ids, targets, expected_versions, automatic, draft_decisions, line_snapshot)
 
     def create_batch(self, selections, targets):
         if not isinstance(selections, list) or not selections or len(selections) > 100:
@@ -235,7 +258,7 @@ class ProductionService:
                                 'error': str(exc)})
         return {'results': results}
 
-    def _create_jobs(self, batch_id, event_ids, targets, expected_versions=None, automatic=False, draft_decisions=None):
+    def _create_jobs(self, batch_id, event_ids, targets, expected_versions=None, automatic=False, draft_decisions=None, line_snapshot=None):
         if not isinstance(event_ids, list) or not isinstance(targets, list):
             raise ValueError('需要选题和目标账号列表')
         if not event_ids or any(not isinstance(x, str) or not x for x in event_ids):
@@ -247,8 +270,13 @@ class ProductionService:
             raise ValueError('批次已变化，请刷新')
         events = {e['id']:e for e in (source.get('review') or {}).get('events', []) if (e.get('comparison') or {}).get('selected') is True}
         items = {i['ref']:i for i in source.get('items', [])}
-        line = source.get('line') or {}
+        line = copy.deepcopy(line_snapshot or source.get('line') or {})
+        if line_snapshot and policy.line_hash(line) != policy.line_hash(source.get('line') or {}):
+            raise ValueError('选稿快照与筛选依据不一致')
+        column_policy.defaults(line)
         if line.get('format') == 'digest':
+            shortage = column_policy.count_error(line, len(set(event_ids)))
+            if shortage: raise ValueError(shortage)
             selected = [events[i] for i in dict.fromkeys(event_ids) if i in events]
             if not selected or len(selected) != len(set(event_ids)):
                 raise ValueError('集合必须选择本线已核实候选')
@@ -307,7 +335,28 @@ class ProductionService:
                         if automatic and existing['status'] == 'cancelled':
                             raise ValueError('该题的制作任务已取消，请手动决定是否重做')
                         if automatic and line.get('format') == 'digest' and existing['event_id'] != event_id:
-                            raise ValueError('本期已有其他集合稿，请在稿件中查看')
+                            if not existing.get('digest_replenishment'):
+                                raise ValueError('本期已有其他集合稿，请在稿件中查看')
+                            if existing['id'] in self.running or existing.get('remote') or existing.get('operation_uncertain'):
+                                raise ValueError('已有集合正在执行或存在平台结果，不能自动补换条目')
+                            occupied=self.occupied_inputs(line,ignore_job_ids=[existing['id']])
+                            if any((i['ref'],i.get('version')) in occupied for i in ref_items):
+                                raise ValueError('补选消息已被其他作品占用')
+                            with self.lock:
+                                self._record(existing,'entries_before_replenishment',{'entries':existing['packet']['entries']})
+                                existing['packet'].update(refs=copy.deepcopy(event['refs']),items=ref_items,materials=sources,
+                                    entries=copy.deepcopy(event['entries']),assessment=copy.deepcopy(event['assessment']),
+                                    screening=copy.deepcopy(event['screening']),comparison=copy.deepcopy(event['comparison']),
+                                    draft_decisions=copy.deepcopy(draft_decisions or {}),
+                                    frozen_at=(source.get('batch') or {}).get('input_cutoff_at') or (source.get('batch') or {}).get('started_at'))
+                                existing.update(event_id=event_id,adoption_key=adoption_key,status='queued',stage='writing',
+                                                revision=existing['revision']+1,error=None,approval=None,editorial_repairs=0)
+                                for field in ('writing','edited','editorial_review','digest_replenishment','repair_formatted_draft'):
+                                    existing.pop(field,None)
+                                self._record(existing,'entries_replenished',{'ids':[e['id'] for e in event['entries']]})
+                                self._enqueue(existing['id'],'compose')
+                            results.append({'event_id':event_id,'target':target,'job_id':existing['id'],'ok':True,'reused':True})
+                            continue
                         if existing['status'] == 'cancelled' and not automatic:
                             if existing['id'] in self.running:
                                 raise ValueError('原任务正在停止，请稍后重新加入队列')
@@ -343,9 +392,10 @@ class ProductionService:
                         packet = {'refs':event['refs'], 'items':ref_items, 'materials':sources, 'assessment':copy.deepcopy(event.get('assessment')), 'comparison':copy.deepcopy(event.get('comparison')), 'ranking':copy.deepcopy(event.get('ranking')),
                             'primary_original_id':event.get('primary_original_id'), 'screening':copy.deepcopy(event.get('screening')),
                             'account':{k:account.get(k) for k in ('id','platform','display_name')}, 'account_guidance':account.get('guidance') or ''}
-                        packet.update(line=copy.deepcopy(line), format=line.get('format', 'single'),
+                        packet.update(production_occurrence=(source.get('batch') or {}).get('production_occurrence'),
+                                      line=copy.deepcopy(line), format=line.get('format', 'single'),
                                       edition_id=source.get('edition_id'), entries=copy.deepcopy(event.get('entries') or []),
-                                      frozen_at=(source.get('batch') or {}).get('started_at'))
+                                      frozen_at=(source.get('batch') or {}).get('input_cutoff_at') or (source.get('batch') or {}).get('started_at'))
                         if line.get('writing_rules', '').strip():
                             packet['account_guidance'] = '本栏目创作要求：\n' + line['writing_rules'].strip() + (
                                 '\n\n所选账号约束：\n' + packet['account_guidance'] if packet['account_guidance'] else '')
@@ -353,7 +403,7 @@ class ProductionService:
                             members = [e['id'] for e in packet['entries']] or [event_id]
                             packet['draft_decisions'] = {i: draft_decisions[i] for i in members}
                             directions = [f"{v['title']}（{v['use']}）：{v['reason']}" for v in packet['draft_decisions'].values()]
-                            packet['account_guidance'] += '\n选稿判断（搬运按已核实来源署名转述）：\n' + '\n'.join(directions)
+                            packet['account_guidance'] += '\n选稿判断（来源展示遵守栏目写作要求）：\n' + '\n'.join(directions)
                         editorial.require_original({'packet':packet})
                         job = {'id':job_id, 'batch_id':batch_id, 'event_id':event_id, 'source_title':ref_items[0].get('title') or '', 'target':target,
                             'adoption_predecessors': predecessors,
@@ -378,7 +428,7 @@ class ProductionService:
                     results.append({'event_id':event_id,'target':target,'ok':False,'error':str(exc)})
         return {'results':results}
 
-    def occupied_inputs(self, line):
+    def occupied_inputs(self, line, ignore_job_ids=()):
         """Unchanged inputs already used by every configured target account."""
         targets = line.get('targets') or [{'platform': 'local', 'account_id': None}]
         from . import pool
@@ -387,6 +437,7 @@ class ProductionService:
             for target in targets:
                 pairs = set()
                 for job in self.jobs.values():
+                    if job['id'] in ignore_job_ids:continue
                     packet = job['packet']
                     if (job['target'] != target or job['status'] == 'cancelled'
                             or (target['platform'] == 'local' and packet.get('line', {}).get('id') != line.get('id'))
@@ -749,7 +800,15 @@ class ProductionService:
             stage = 'writing'
         if stage == 'writing':
             with self.lock: self._phase(job, 'writing'); view = copy.deepcopy(job)
-            value = composition.write(call_root, view, cancel)
+            from .digest import ReplenishmentRequired
+            try:
+                value = composition.write(call_root, view, cancel)
+            except ReplenishmentRequired as exc:
+                with self.lock:
+                    job.update(digest_preserved=exc.candidate,digest_replenishment={'ids':exc.ids,'reason':str(exc)},
+                               stage='needs_attention',status='needs_attention',error='自动补选：'+str(exc))
+                    self._record(job,'digest_replenishment_requested',job['digest_replenishment'])
+                return False
             with self.lock:
                 if cancel.is_set(): return
                 job['writing'] = value; job.pop('edited', None); self._phase(job, 'editing')
@@ -757,13 +816,6 @@ class ProductionService:
         if stage == 'editing':
             with self.lock: self._phase(job, 'editing'); view = copy.deepcopy(job)
             candidate = copy.deepcopy(view.get('edited') or view['writing'])
-            if view.get('cover_search_version') != cover_assets.SEARCH_VERSION or 'cover_candidates' not in view:
-                issues = []
-                view['cover_candidates'] = cover_assets.for_materials(self.media_dir, job_id, view['packet']['materials'], view['writing'].get('cover_query'), issues=issues)
-                with self.lock:
-                    job['cover_candidates'] = view['cover_candidates']; job['cover_search_version'] = cover_assets.SEARCH_VERSION
-                    job['packet']['materials'] = copy.deepcopy(view['packet']['materials'])
-                    self._record(job, 'image_preparation', {'candidates': len(view['cover_candidates']), 'issues': issues})
             # Persist each repaired manuscript before paying for its independent
             # review. Restarting editing resumes that exact manuscript and budget.
             repairs = view.get('editorial_repairs', 0)
@@ -787,6 +839,15 @@ class ProductionService:
                         if cancel.is_set(): return
                         job['editorial_review'] = verdict
                         self._record(job, 'editorial_review', {'round': repairs + 1, **verdict})
+                if job['packet'].get('format')=='digest' and verdict.get('rejected_entry_ids'):
+                    rejected=set(verdict['rejected_entry_ids'])
+                    passed_ids={r['entry_id'] for r in verdict.get('entry_reviews',[]) if r['decision']=='pass'}
+                    preserved=dict(candidate,entries=[e for e in candidate['entries'] if e['entry_id'] in passed_ids])
+                    with self.lock:
+                        job.update(digest_preserved=preserved,digest_replenishment={'ids':sorted(rejected),'reason':'简讯核心材料不足'},
+                                   stage='needs_attention',status='needs_attention',error='系统正在补选简讯')
+                        self._record(job,'digest_replenishment_requested',job['digest_replenishment'])
+                    return False
                 if verdict['passed'] or repairs >= 3:
                     break
                 if verdict['decision'] == 'insufficient':
@@ -832,6 +893,7 @@ class ProductionService:
                 view = copy.deepcopy(job)
                 view['draft'].update(title=edited['title'], body_html=plain_body)
                 bundle = article_images.prepare(self.root, self.media_dir, view, plain_body, cancel)
+                with self.lock:job['cover_search_version']=cover_assets.SEARCH_VERSION
                 plain_body = bundle['body_html']
             cover = {key: bundle[key] for key in ('cover_url','cover_sha256','cover_kind','cover_source')}
             # Retain a local draft for review, but spend nothing on a rejected
@@ -969,12 +1031,15 @@ class ProductionService:
 
     def _typeset(self, job_id, body, cancel):
         from . import ai_settings
-        digest=policy.digest([typesetting.key(body), ai_settings.cache_key(getattr(cancel, 'ai_settings_snapshot', None), ('layout',))])
+        line = self.jobs[job_id]['packet'].get('line') or {}
+        if line.get('format')=='digest':
+            return body, {'kind':'digest','source':'column_structure','text_unchanged':True}
+        digest=policy.digest([typesetting.key(body), column_policy.context(line, 'layout'), ai_settings.cache_key(getattr(cancel, 'ai_settings_snapshot', None), ('layout',))])
         with self.lock: gate=self.editorial_locks.setdefault(('layout',digest),threading.Lock())
         with gate:
             folder=self.root/'layouts';folder.mkdir(exist_ok=True)
             path=folder/(digest+'.json')
-            layout=json.loads(path.read_text(encoding='utf-8')) if path.exists() else typesetting.plan(self.jobs_dir/job_id,body,cancel)
+            layout=json.loads(path.read_text(encoding='utf-8')) if path.exists() else typesetting.plan(self.jobs_dir/job_id,body,cancel,line)
             result=typesetting.apply(body,layout)
             # Only paragraph boundaries and emphasis can change. Images stay in
             # their original position relative to the surrounding source blocks.

@@ -7,9 +7,11 @@ const line = computed(() => props.state.line)
 const rounds = computed(() => (props.state.draft_rounds || []).filter(r=>r.method==='ai' && r.status!=='cancelled'))
 function status(round) {
  switch (round.status) {
+ case 'replenishing': return '消息不足，正在自动补筛，已选内容保留…'
  case 'judging': return 'AI 正在比较本轮已核实的帖子…'
  case 'ready': return '已选 ' + round.ids.length + ' 个，正在入队'
- case 'sent': return '已入制作队列 · ' + round.ids.length + ' 个'
+ case 'sent': return round.ids.length + ' 条选题 · ' + (round.production?.work_count || 0) + ' 篇稿件 · ' + (round.production?.label || '制作记录待核对')
+ case 'insufficient': return round.error
  case 'empty': return round.choices.length ? 'AI 判断本轮没有值得制作的帖子' : '本轮没有可供 AI 选择的新帖子'
  case 'failed': return (round.retry_from==='judging'?'AI 选稿失败：':'入队未完成：') + round.error
  default: return ''

@@ -19,22 +19,25 @@ def advanced(row):
 def stage_rules(line, stage):
     from .columns import screening_template
     line = line or {}
-    return (line.get('screening_rules') or screening_template(line.get('mode','hotspot')))[stage]
+    return (line.get('screening_rules') or screening_template(line.get('format','single')))[stage]
 
 
 def selection_limit(line):
     line = line or {}
-    value = line.get('max_candidates', 5 if line.get('mode')=='digest' else 2)
-    if type(value) is not int or not 1 <= value <= 10:
+    value = line.get('max_candidates', 20 if line.get('format')=='digest' else 2)
+    if type(value) is not int or not 1 <= value <= 50:
         raise ValueError('单轮取材上限无效')
     return value
 
 
 def stage_hash(line, stage):
     line = line or {}
-    return digest({'contract': 'compact-3' if stage in ('selection','initial') else 'column-stages-1','mode':line.get('mode','hotspot'),
+    from . import column_policy
+    return digest({'format':line.get('format', 'single'), 'format_selection': column_policy.screening_settings(line), 'contract': 'column-workflow-6',
         'scope':line.get('rules',''),'stage':stage,'rules':stage_rules(line,stage),
-        **({'max_candidates':selection_limit(line)} if stage=='selection' else {})})
+        **({'timeliness_contract':1} if stage=='verification' and line.get('format')=='digest' else {}),
+        **({'max_candidates':selection_limit(line)} if stage=='selection' else {}),
+        **({'initial_contract':'compact-evidence-2'} if stage=='initial' else {})})
 
 
 def model_context(line, stage):
@@ -42,7 +45,9 @@ def model_context(line, stage):
               ['initial'] if stage.startswith('initial') else
               ['selection'] if 'selection' in stage else
               ['verification'] if stage in ('assessment','digest-verification') else [])
-    context = {k:line.get(k) for k in ('id','name','mode','format','sources','reference_domains','valid_hours','rules')}
+    context = {k:line.get(k) for k in ('id','name','format','sources','reference_domains','valid_hours','rules')}
+    from . import column_policy
+    context['format_policy'] = column_policy.screening_settings(line)
     context['valid_hours'] = line.get('_scope_hours', line.get('valid_hours'))
     context['screening_rules']={s:stage_rules(line,s) for s in stages}
     if 'selection' in stages: context['max_candidates']=selection_limit(line)
@@ -75,16 +80,16 @@ DIMENSIONS = {
 }
 
 
-def dimensions_schema(stage):
+def dimensions_schema(stage, form='single'):
     from .review import obj, S
-    return obj({key:obj({'judgment':S, 'evidence':evidence_schema()}) for key in DIMENSIONS[stage]})
+    keys = ('news', 'relevance') if stage == 'initial' and form == 'digest' else DIMENSIONS[stage]
+    return obj({key:obj({'judgment':S, 'evidence':evidence_schema()}) for key in keys})
 
 
 def dimensions_prompt(stage, mode='hotspot'):
     labels = dict(DIMENSIONS[stage])
-    if mode=='digest':
-        if 'participation' in labels: labels['participation']='本栏目读者相关性，不要求争议或情绪参与'
-        if 'angle' in labels: labels['angle']='本期简报条目要点，不要求独立长文角度'
+    if 'participation' in labels: labels['participation']='当前栏目要求的读者相关性'
+    if 'angle' in labels: labels['angle']='当前成稿形式需要的切入或消息要点'
     fields = '；'.join(key+'='+label for key,label in labels.items())
     return ('dimensions分别记录本轮判断：'+fields+'。每项judgment用一句具体判断说明原因，'
             'evidence引用本轮材料；无法判断时明确写出缺什么，不编造依据。'
@@ -103,12 +108,12 @@ def evidence_check(evidence, inputs):
             raise ValueError('引用不能在本事件实际输入中定位')
 
 
-def outcome(stage, value, inputs):
+def outcome(stage, value, inputs, form='single'):
     """Validate provenance and explicit decisions; never infer quality from a score."""
     from .screen import timestamp
     import jsonschema
-    if value.get('dimensions') or stage == 'verification' or (stage == 'initial' and value['decision'] == 'advance'):
-        jsonschema.validate(value.get('dimensions'), dimensions_schema(stage))
+    if value.get('dimensions') or stage == 'verification':
+        jsonschema.validate(value.get('dimensions'), dimensions_schema(stage, form))
     for entry in value['dimensions'].values():
         if not entry['judgment'].strip(): raise ValueError('本轮判断维度缺少具体说明')
     dimension_quotes = dimension_evidence(value)
@@ -119,7 +124,7 @@ def outcome(stage, value, inputs):
     if not value['reason'].strip():
         raise ValueError('缺少具体取舍理由')
     evidence_check(value.get('evidence', []), inputs)
-    if value['decision'] == 'advance' and not value.get('evidence'):
+    if (value['decision'] == 'advance' or stage=='initial' and value['decision']=='drop') and not value.get('evidence'):
         raise ValueError('晋级缺少具体输入依据')
     labels = value.get('labels', [])
     if len({x['rule'] for x in labels}) != len(labels):
@@ -151,6 +156,12 @@ def line_basis(line):
     value.pop('screen_scope', None)
     value.pop('enabled', None)
     value.pop('writing_rules', None)
+    for field in ('format_policy', 'production_rules', 'production_schedule'):
+        value.pop(field, None)
+    from . import column_policy
+    value['format_selection'] = column_policy.screening_settings(line)
+    if line.get('format') == 'digest':
+        value['verification_contract'] = stage_hash(line, 'verification')
     value.pop('_scope_hours', None)
     return value
 

@@ -4,7 +4,7 @@ import json
 import re
 from pathlib import Path
 from lxml import html as lhtml, etree
-from . import composition, review
+from . import composition, review, column_policy
 
 
 def compact(value):
@@ -20,12 +20,14 @@ def key(body):
     return hashlib.sha256(json.dumps(paragraphs(body),ensure_ascii=False).encode()).hexdigest()
 
 
-def plan(root, body, cancel):
+def plan(root, body, cancel, line=None):
     source=paragraphs(body)
     def bounded(result):
         budget=sum(len(compact(p)) for p in source)*.18
         used=0;count=0
         for block in result['blocks']:
+            if column_policy.settings(line)['max_paragraphs'] and len(block['parts']) > 1:
+                block['parts'] = [{'text': ''.join(p['text'] for p in block['parts']), 'emphasis': []}]
             for part in block['parts']:
                 kept=[]
                 for phrase in part['emphasis']:
@@ -38,15 +40,15 @@ def plan(root, body, cancel):
         return result
     # A completed model call can outlive a local rendering failure. Reuse it
     # only when every current paragraph is still proven unchanged.
-    for path in sorted(Path(root).glob('calls/production-typesetting-*/final.json'),key=lambda p:p.stat().st_mtime,reverse=True):
+    for path in ([] if line else sorted(Path(root).glob('calls/production-typesetting-*/final.json'),key=lambda p:p.stat().st_mtime,reverse=True)):
         try:return bounded(json.loads(path.read_text(encoding='utf-8')))
         except (ValueError,KeyError,TypeError):continue
     part=review.obj({'text':review.S,'emphasis':{'type':'array','items':review.S}})
     block=review.obj({'index':{'type':'integer'},'parts':{'type':'array','items':part}})
     schema=review.obj({'blocks':{'type':'array','items':block}})
     result=composition._model(root,'production-typesetting',schema,
-        '你是中文移动端文章排版编辑。只做分段与加粗，不改写，不新增标题、事实、词语或标点，不调整原句顺序。'
-        '参考成熟数码作者文章的阅读节奏：每段一个意思，长段在句号后拆开；转折句可独立成段。'
+        column_policy.context(line, 'layout') + '你是中文移动端文章排版编辑。只做分段与加粗，不改写，不新增标题、事实、词语或标点，不调整原句顺序。'
+        '按栏目排版要求处理。栏目限制每条段数时保留原段，不再拆分；集合保留各消息标题和边界。'
         '几百字短文不强塞目录、小标题或编号。按意思选择少量重点，帮助扫读事件关键变化、统计范围或实际提醒；'
         '不要把整段、来源、无关数字或所有句子都加粗。单处不超过28字，加粗总字数不超过正文18%。'
         'emphasis必须是本part里出现一次的原文连续子串，不要只突出百分数却隐去适用范围。'

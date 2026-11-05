@@ -5,6 +5,7 @@ import { ElMessageBox, ElMessage } from 'element-plus'
 import { api } from './api'
 import { lineSchedule, scheduleLabel } from './screenSchedule'
 import Icon from './Icon.vue'
+import ColumnProductionSettings from './ColumnProductionSettings.vue'
 import { creation, switchSelection } from './workflow'
 
 const route=useRoute(), router=useRouter()
@@ -24,8 +25,28 @@ async function refresh(){
 function open(line){
   editingId.value=line?.id||null;revision.value=data.value.revision;fieldError.value='';formTab.value='content'
   form.value=line?{enabled:true,writing_rules:'',...JSON.parse(JSON.stringify(line))}:{name:'',sources:[],rules:'',screening_rules:JSON.parse(JSON.stringify(data.value.screening_templates?.hotspot||{initial:'',selection:'',verification:''})),max_candidates:2,writing_rules:'',mode:'hotspot',format:'single',valid_hours:48,edition_hours:24,reference_domains:[],interval_minutes:null,targets:[],enabled:true}
+  form.value.auto_draft ??= false
+  form.value.draft_limit ??= 2
+  const profile=data.value.editorial_templates[form.value.format]
+  form.value.draft_rules ||= profile.draft_rules
+  form.value.writing_rules ||= profile.writing_rules
+  form.value.production_rules ||= JSON.parse(JSON.stringify(profile.production_rules))
+  form.value.format_policy ||= JSON.parse(JSON.stringify(data.value.format_templates[form.value.format]))
+  form.value.production_schedule = {times:['08:00'],weekdays:[1,2,3,4,5],...form.value.production_schedule,mode:form.value.production_schedule?.mode||'off',prepare_minutes:form.value.production_schedule?.prepare_minutes||60,delivery:form.value.production_schedule?.delivery||'local'}
+  formatProfiles={};previousFormat=form.value.format
   editing.value=true
 }
+let formatProfiles={},previousFormat='single'
+const profileFields=['screening_rules','draft_rules','writing_rules','production_rules','format_policy','max_candidates']
+function changeFormat(value){
+ formatProfiles[previousFormat]=JSON.parse(JSON.stringify(Object.fromEntries(profileFields.map(k=>[k,form.value[k]]))))
+ const profile=formatProfiles[value]||{...data.value.editorial_templates[value],format_policy:data.value.format_templates[value],max_candidates:value==='digest'?20:2}
+ Object.assign(form.value,JSON.parse(JSON.stringify(profile)))
+ previousFormat=value
+}
+
+function productionLabel(line){return line.production_schedule?.mode!=='off'&&line.production_schedule?`出稿 · ${scheduleLabel(line.production_schedule)}`:(scheduleLabel(lineSchedule(line))||'手动筛选')}
+const editionLabels={waiting:'等待准备',preparing:'准备中',completed:'本期已完成',missed:'已逾期',failed:'需处理',stopped:'已停止'}
 async function save(){
   fieldError.value=''
   if(!form.value.name.trim()){fieldError.value='请填写栏目名称';return}
@@ -33,12 +54,12 @@ async function save(){
   if(!form.value.rules.trim()){fieldError.value='请填写栏目定位与范围';formTab.value='content';return}
   for(const [key,label] of [['initial','初筛'],['selection','二筛'],['verification','三筛']])if(!form.value.screening_rules?.[key]?.trim()){fieldError.value=`请填写${label}规则`;formTab.value='screening';return}
   pending.value=true
-  const fields=['name','sources','rules','screening_rules','max_candidates','writing_rules','mode','format','valid_hours','edition_hours','reference_domains','targets']
+  const fields=['name','sources','rules','screening_rules','max_candidates','writing_rules','mode','format','valid_hours','edition_hours','reference_domains','targets','auto_draft','draft_limit','draft_rules','production_rules','format_policy','production_schedule']
   try{await api('/api/columns'+(editingId.value?'/'+editingId.value:''),{expected_revision:revision.value,column:Object.fromEntries(fields.map(k=>[k,form.value[k]]))},editingId.value?'PATCH':'POST');editing.value=false;await refresh();ElMessage.success('栏目已保存')}
   catch(e){fieldError.value=e.message}finally{pending.value=false}
 }
 async function useTemplate(){
-  const value=data.value.screening_templates?.[form.value.mode];if(!value)return
+  const value=data.value.screening_templates?.[form.value.format];if(!value)return
   try{await ElMessageBox.confirm('替换当前三轮规则？','套用规则模板',{confirmButtonText:'替换',cancelButtonText:'取消'})}catch{return}
   form.value.screening_rules=JSON.parse(JSON.stringify(value))
 }
@@ -63,12 +84,6 @@ function editSource(value){source.value={...value};sourceRevision.value=data.val
 async function saveSource(){pending.value=true;fieldError.value='';try{await api('/api/sources/'+source.value.id,{expected_revision:sourceRevision.value,source:{enabled:source.value.enabled,interval_minutes:source.value.interval_minutes}},'PATCH');sourceOpen.value=false;await refresh();ElMessage.success('来源设置已保存')}catch(e){fieldError.value=e.message}finally{pending.value=false}}
 watch(()=>route.path,()=>{editing.value=false;sourceOpen.value=false;refresh()})
 
-watch(()=>form.value.mode,(next,previous)=>{
-  if(!editingId.value&&data.value.screening_templates?.[next]&&JSON.stringify(form.value.screening_rules)===JSON.stringify(data.value.screening_templates?.[previous])){
-    form.value.screening_rules=JSON.parse(JSON.stringify(data.value.screening_templates[next]))
-    form.value.max_candidates=next==='digest'?5:2
-  }
-})
 watch(form,()=>{fieldError.value=''}, {deep:true})
 onMounted(refresh)
 </script>
@@ -97,21 +112,22 @@ onMounted(refresh)
         </div>
         <button class="column-title" @click="enter(line)">{{line.name}}</button>
         <div class="channel-tags"><span v-for="id in line.sources" :key="id">{{names[id]||id}}</span></div>
-        <div class="column-card-bottom"><span class="muted">{{line.format==='digest'?'集合稿':'单篇'}}<span class="dot">·</span>{{scheduleLabel(lineSchedule(line)) || '手动筛选'}}</span><button class="text-action" @click="enter(line)">选题<Icon name="arrow" :size="16" /></button></div>
+        <p v-if="line.format==='digest'" class="muted">每期目标 {{line.format_policy?.target_items}} 条消息</p>
+        <p v-if="line.production_editions?.length" class="muted" :title="line.production_editions.at(-1).error">{{editionLabels[line.production_editions.at(-1).status]}}<span v-if="line.production_editions.at(-1).error"> · {{line.production_editions.at(-1).error}}</span></p>
+        <div class="column-card-bottom"><span class="muted">{{line.format==='digest'?'集合稿':'单篇'}}<span class="dot">·</span>{{productionLabel(line)}}</span><button class="text-action" @click="enter(line)">选题<Icon name="arrow" :size="16" /></button></div>
       </article>
     </div>
   </template>
 
   <el-drawer v-model="editing" :title="editingId?'编辑栏目':'新建栏目'" size="640px" :close-on-click-modal="false" class="column-form-drawer">
-    <el-tabs v-model="formTab"><el-tab-pane label="内容设置" name="content"/><el-tab-pane label="三轮规则" name="screening"/></el-tabs>
+    <el-tabs v-model="formTab"><el-tab-pane label="内容设置" name="content"/><el-tab-pane label="三轮规则" name="screening"/><el-tab-pane label="选稿与创作" name="production"/><el-tab-pane label="形式与图片" name="format"/><el-tab-pane label="定时交付" name="schedule"/></el-tabs>
     <el-alert v-if="fieldError" :title="fieldError" type="error" :closable="false" />
     <el-form label-position="top" @submit.prevent="save">
       <div v-show="formTab==='content'">
         <el-form-item label="栏目名称" required><el-input v-model="form.name" aria-label="栏目名称" maxlength="40" /></el-form-item>
         <el-form-item label="渠道" required><el-checkbox-group v-model="form.sources" class="channel-picker"><el-checkbox v-for="s in data.sources" :key="s.id" :value="s.id">{{s.name}}<span v-if="!s.enabled" class="muted">（已停用）</span></el-checkbox></el-checkbox-group></el-form-item>
         <el-form-item label="栏目定位与范围" required><el-input v-model="form.rules" aria-label="栏目定位与范围" type="textarea" :rows="3" maxlength="10000" /></el-form-item>
-        <div class="form-grid"><el-form-item label="筛选方式"><el-select v-model="form.mode" aria-label="筛选方式"><el-option label="递进筛选" value="hotspot"/><el-option label="消息选编" value="digest"/></el-select></el-form-item><el-form-item label="成稿形式"><el-select v-model="form.format" aria-label="成稿形式"><el-option label="单篇" value="single"/><el-option label="集合稿" value="digest"/></el-select></el-form-item></div>
-        <el-form-item label="创作要求"><el-input v-model="form.writing_rules" aria-label="创作要求" type="textarea" :rows="3" maxlength="10000" /></el-form-item>
+        <div class="form-grid"><el-form-item label="成稿形式"><el-select v-model="form.format" aria-label="成稿形式" @change="changeFormat"><el-option label="单篇" value="single"/><el-option label="集合稿" value="digest"/></el-select></el-form-item></div>
         <div class="form-grid"><el-form-item label="内容有效期"><div class="number-field"><el-input-number v-model="form.valid_hours" :min="1" :max="8760" aria-label="内容有效期"/><span>小时</span></div></el-form-item><el-form-item v-if="form.format==='digest'" label="集合周期"><div class="number-field"><el-input-number v-model="form.edition_hours" :min="1" :max="8760" aria-label="集合周期"/><span>小时</span></div></el-form-item></div>
         <el-form-item label="目标账号"><el-checkbox-group v-model="accountIds" class="account-picker"><el-checkbox v-for="a in accounts" :key="a.id" :value="a.id">{{a.platform==='wechat'?'公众号':'今日头条'}} · {{a.identity?.name||a.display_name}}</el-checkbox></el-checkbox-group><RouterLink v-if="!accounts.length" to="/accounts">添加账号</RouterLink></el-form-item>
       </div>
@@ -119,9 +135,10 @@ onMounted(refresh)
         <el-form-item label="初筛规则" required><el-input v-model="form.screening_rules.initial" aria-label="初筛规则" type="textarea" :rows="4" maxlength="10000" /></el-form-item>
         <el-form-item label="二筛规则" required><el-input v-model="form.screening_rules.selection" aria-label="二筛规则" type="textarea" :rows="4" maxlength="10000" /></el-form-item>
         <el-form-item label="三筛规则" required><el-input v-model="form.screening_rules.verification" aria-label="三筛规则" type="textarea" :rows="4" maxlength="10000" /></el-form-item>
-        <el-form-item label="单轮最多取材"><div class="number-field"><el-input-number v-model="form.max_candidates" :min="1" :max="10" :precision="0" aria-label="单轮最多取材"/><span>条</span></div></el-form-item>
-        <el-button text @click="useTemplate">套用{{form.mode==='digest'?'简报':'单篇'}}规则模板</el-button>
+        <el-form-item label="单轮最多取材"><div class="number-field"><el-input-number v-model="form.max_candidates" :min="1" :max="50" :precision="0" aria-label="单轮最多取材"/><span>条</span></div></el-form-item>
+        <el-button text @click="useTemplate">套用{{form.format==='digest'?'集合稿':'单篇'}}规则模板</el-button>
       </div>
+      <ColumnProductionSettings v-if="form.format_policy" :form="form" :section="formTab" />
     </el-form>
     <template #footer><el-button :disabled="pending" @click="editing=false">取消</el-button><el-button type="primary" :loading="pending" @click="save">保存栏目</el-button></template>
   </el-drawer>

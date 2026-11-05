@@ -33,6 +33,7 @@ function verdict(s,e) {
  return draftRound(s,e)?.choices.find(c=>c.id===e.id && c.version===e.version)
 }
 function locked(s,e) {
+ if(e.production?.jobs?.length)return e.production.occupied
  const round=draftRound(s,e)
  if(!round)return false
  return round.status==='judging' || (round.ids.includes(e.id) && verdict(s,e) && ['ready','sent','failed'].includes(round.status))
@@ -44,7 +45,7 @@ async function changeDraft(s,change) {
  catch(e){error.value=e.message}
  finally {await refresh();savingLine.value=''}
 }
-function queued(s,e){const r=draftRound(s,e);return r?.status==='sent'&&r.ids.includes(e.id)}
+function productionLabel(s,e){if(e.production?.label)return e.production.label;const r=draftRound(s,e);return r?.status==='sent'&&r.ids.includes(e.id)?'制作记录待核对':''}
 function canPick(s,e){return e.selectable!==false&&s.selection_current&&s.line.enabled!==false&&!locked(s,e)}
 function pick(s,e,value) {
  if(!canPick(s,e))return
@@ -97,7 +98,7 @@ onMounted(poll);onBeforeUnmount(()=>{disposed=true;clearTimeout(timer);persist()
    <DraftSelectionBar :state="s" :readonly="s.historical" :saving="!!savingLine" @change="change=>changeDraft(s,change)" />
    <div class="shortlist-bar"><div class="filter-tabs"><button :class="{active:!isPending(s)}" :disabled="!ready(s).length" @click="pendingViews[s.line.id]=false;pages[s.line.id]=1;expanded[s.line.id]=true">可做稿 {{ready(s).length}}</button><button :class="{active:isPending(s)}" @click="pendingViews[s.line.id]=true;pages[s.line.id]=1;expanded[s.line.id]=true">待处理 {{s.pending_refs?.length||0}}</button></div><span class="muted">有效素材 {{s.pool?.eligible||0}}</span></div>
    <el-table v-if="showRows(s)" :data="filteredRows(s).slice(((pages[s.line.id]||1)-1)*20,(pages[s.line.id]||1)*20)" row-key="id" :empty-text="sourceFilters[s.line.id]?.length?'所选来源暂无内容':busy(s)?'正在筛选…':'暂无内容'" @filter-change="filters=>filterSources(s,filters)" @row-click="e=>inspect(s,e)">
-    <el-table-column v-if="!isPending(s)" label="选择" width="100"><template #default="{row}"><span v-if="queued(s,row)" class="row-state">已入队</span><el-checkbox v-else-if="canPick(s,row)" :model-value="selected.includes(key(s,row))" @change="value=>pick(s,row,value)" :aria-label="`选择 ${item(s,row.refs[0])?.title}`" @click.stop/><span v-else class="row-state">{{draftRound(s,row)?.status==='judging'?'选稿中':'—'}}</span></template></el-table-column>
+    <el-table-column v-if="!isPending(s)" label="选择 / 制作状态" width="145"><template #default="{row}"><span v-if="productionLabel(s,row) && (row.production?.occupied || !canPick(s,row))" class="row-state">{{productionLabel(s,row)}}</span><el-checkbox v-else-if="canPick(s,row)" :model-value="selected.includes(key(s,row))" @change="value=>pick(s,row,value)" :aria-label="`选择 ${item(s,row.refs[0])?.title}`" @click.stop/><span v-else class="row-state">{{draftRound(s,row)?.status==='judging'?'选稿中':'—'}}</span></template></el-table-column>
     <el-table-column label="标题" min-width="300"><template #default="{row}"><button class="candidate-title" @click.stop="inspect(s,row)">{{item(s,row.refs[0])?.title}}</button></template></el-table-column>
     <el-table-column label="来源" width="160" column-key="source" :filters="sourceOptions(s)" :filtered-value="sourceFilters[s.line.id]" :filter-multiple="true"><template #filter-icon><button class="table-filter-button" :class="{active:sourceFilters[s.line.id]?.length}" :aria-label="`${s.line.name}来源筛选`"><Icon name="filter" :size="14"/></button></template><template #default="{row}">{{[...new Set(row.refs.map(r=>item(s,r)?.source_name))].filter(Boolean).join('、')}}</template></el-table-column>
     <el-table-column label="判断" min-width="240"><template #default="{row}"><template v-if="!isPending(s) && verdict(s,row)"><strong>{{verdict(s,row).use}}</strong> · {{verdict(s,row).reason}}</template><template v-else>{{sourceIssue(row.error)||row.comparison?.reason||row.assessment?.reason||row.plan?.reason||'待筛选'}}</template></template></el-table-column>

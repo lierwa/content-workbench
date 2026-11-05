@@ -13,7 +13,7 @@ from PIL import Image, ImageOps
 
 _lock = threading.Lock()
 _ALLOWED = {'cc0', 'public domain', 'pdm'}
-SEARCH_VERSION = 9
+SEARCH_VERSION = 10
 
 
 def _source_download(url, source_url):
@@ -31,53 +31,37 @@ def _source_download(url, source_url):
     return content
 
 
-def for_materials(media_dir, job_id, materials, query, issues=None):
-    """Article photos are cached before review, so failed downloads are not selected."""
-    choices, seen = [], set()
+def for_materials(media_dir, job_id, materials, query, issues=None, max_candidates=12):
+    """Bound optional image preparation; interleave reports instead of downloading every image."""
+    if max_candidates <= 0:return []
+    choices, seen, rows = [], set(), []
     issues = issues if issues is not None else []
+    deadline=time.monotonic()+45
+    from .materials import IMAGES_VERSION
     for material in sorted(materials, key=lambda m: m.get('role') != 'original'):
-        if material.get('status') != 'read':
-            continue
-        from .materials import IMAGES_VERSION
-        if 'images' not in material or material.get('images_version') != IMAGES_VERSION:
-            # Older saved text has no image manifest. Fetch it once without
-            # replacing the text snapshot or purchasing another writing call.
-            from .materials import fetch_material
-            source_url = material.get('final_url') or material['url']
-            cache = Path(media_dir).parent / 'asset-cache'
-            cache.mkdir(exist_ok=True)
-            manifest = cache / (hashlib.sha256(source_url.encode()).hexdigest() + f'.images-v{IMAGES_VERSION}.json')
-            if manifest.exists():
-                material['images'] = json.loads(manifest.read_text(encoding='utf-8'))
-                material['images_version'] = IMAGES_VERSION
-            else:
-                fresh = fetch_material(source_url)
-                if fresh.get('status') == 'read':
-                    material['images'] = fresh.get('images') or []
-                    material['images_version'] = IMAGES_VERSION
-                    material.pop('image_error', None)
-                    manifest.write_text(json.dumps(material['images'], ensure_ascii=False), encoding='utf-8')
-                else:
-                    material['image_error'] = fresh.get('error') or '原帖图片暂时无法读取'
-                    issues.append({'stage': 'source_read', 'url': source_url, 'error': material['image_error']})
-        for index, image in enumerate(material.get('images') or []):
-            url = image['url']
-            if url in seen:
-                continue
-            seen.add(url)
-            choice = {'source': material.get('final_url') or material['url'], 'original_url': url,
-                      'download_url': url, 'title': f"{material.get('title') or material.get('url')} · 图{index + 1}",
-                      'description': image.get('description') or '', 'use': 'source_image',
-                      'material_id': material.get('material_id'), 'role': material.get('role')}
-            try:
-                asset = select(media_dir, job_id, choice)
-            except (OSError, ValueError) as exc:
-                issues.append({'stage': 'source_download', 'url': url, 'error': str(exc)[:300]})
-                continue
-            if asset:
-                choices.append(dict(choice, asset=asset))
-    # Related reporting is resolved and checked by article_images. A generic
-    # stock-photo search cannot establish that a photo depicts this event.
+        if material.get('status') != 'read':continue
+        # Freshly read sources already own their image manifests. An absent
+        # legacy manifest is optional, and must not force a second article fetch.
+        if material.get('images_version') != IMAGES_VERSION:continue
+        rows.append((material,material.get('images') or []))
+    attempts=0
+    for index in range(max((len(images) for _,images in rows),default=0)):
+        for material,images in rows:
+            if index>=len(images):continue
+            if len(choices)>=max_candidates or attempts>=max_candidates*2 or time.monotonic()>=deadline:
+                issues.append({'stage':'preparation_limit','reason':'已达到本次图片准备量或时限，未准备的图片不影响文字成稿'})
+                return choices
+            image=images[index];url=image['url']
+            if url in seen:continue
+            seen.add(url);attempts+=1
+            choice={'source':material.get('final_url') or material['url'],'original_url':url,
+                    'download_url':url,'title':f"{material.get('title') or material.get('url')} · 图{index+1}",
+                    'description':image.get('description') or '', 'use':'source_image',
+                    'material_id':material.get('material_id'),'role':material.get('role')}
+            try:asset=select(media_dir,job_id,choice)
+            except (OSError,ValueError) as exc:
+                issues.append({'stage':'source_download','url':url,'error':str(exc)[:300]});continue
+            if asset:choices.append(dict(choice,asset=asset))
     return choices
 
 

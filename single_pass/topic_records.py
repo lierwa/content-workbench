@@ -78,6 +78,8 @@ def detail(workspace, key):
         lookup = {i['ref']: i for i in state['items']}
         for event in state['review'].get('events', []):
             event['batch_id'] = run
+            if workspace.production:
+                event['production'] = workspace.production.topic_progress(run, event['id'], event.get('version'))
             members = [lookup[r] for r in event['refs'] if r in lookup]
             event['selectable'] = valid and workspace.database.current(members) and all(
                 pool.fresh(i, line) for i in members if i['ref'] in policy.freshness_refs(event))

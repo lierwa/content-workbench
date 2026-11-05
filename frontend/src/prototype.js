@@ -1,18 +1,26 @@
 // Same views as production; all mutations stay in this page's memory.
 import initial from './prototype-data.json'
+import formatTemplates from '../../single_pass/column_templates.json'
+import editorialTemplates from '../../single_pass/editorial_templates.json'
 import draftRules from '../../single_pass/draft_selection_rules.txt?raw'
 import { lineSchedule } from './screenSchedule'
 const copy=value=>JSON.parse(JSON.stringify(value))
 const data=copy(initial)
+data.columns.format_templates=copy(formatTemplates)
+data.columns.editorial_templates=copy(editorialTemplates)
+data.columns.screening_templates=Object.fromEntries(Object.entries(editorialTemplates).map(([k,v])=>[k,copy(v.screening_rules)]))
+data.columns.default_draft_rules=draftRules.trim()
+for(const line of data.columns.lines){line.format_policy ||= copy(formatTemplates[line.format]);line.production_rules ||= Object.fromEntries(['research','editing','review','images','layout'].map(k=>[k,'']));line.production_schedule ||= {mode:'off',prepare_minutes:60,delivery:'local'}}
 const scene=new URLSearchParams(location.search).get('scene')
 if(scene==='empty'){data.columns.lines=[];data.production={jobs:[],works:[],accounts:[],busy:false};data.states={};data.pool={items:[]}}
 let serial=0
 let collectionSettings={revision:0,scope:'all',line_ids:[],source_ids:[],per_source_limit:null,interval_minutes:null,schedule_mode:'manual',daily_times:['09:00']}
 function version(body){if(body?.expected_revision!==data.columns.revision)throw new Error('栏目配置已变化，请刷新后再保存')}
-function validate(line){if(!line.name?.trim())throw new Error('请填写栏目名称');if(!line.sources?.length)throw new Error('请选择渠道');if(!line.rules?.trim())throw new Error('请填写栏目定位与范围');for(const [stage,label] of [['initial','初筛'],['selection','二筛'],['verification','三筛']])if(!line.screening_rules?.[stage]?.trim())throw new Error(`请填写${label}规则`);if(!Number.isInteger(line.max_candidates)||line.max_candidates<1||line.max_candidates>10)throw new Error('单轮取材上限须为 1 至 10 条');if(data.columns.lines.some(l=>l.id!==line.id&&l.name===line.name))throw new Error('已存在同名栏目')}
+function validate(line){if(!line.name?.trim())throw new Error('请填写栏目名称');if(!line.sources?.length)throw new Error('请选择渠道');if(!line.rules?.trim())throw new Error('请填写栏目定位与范围');for(const [stage,label] of [['initial','初筛'],['selection','二筛'],['verification','三筛']])if(!line.screening_rules?.[stage]?.trim())throw new Error(`请填写${label}规则`);if(!Number.isInteger(line.max_candidates)||line.max_candidates<1||line.max_candidates>50)throw new Error('单轮取材上限须为 1 至 50 条');if(data.columns.lines.some(l=>l.id!==line.id&&l.name===line.name))throw new Error('已存在同名栏目')}
 export async function request(path,body,method='POST'){
   if(scene==='error')throw new Error('加载失败，请重试')
   const url=new URL(path,'http://prototype.local'), route=url.pathname
+  if(route==='/api/production-run'){if(body)throw new Error('请在本机工作台启动真实采集出稿');return {run:null}}
   if(body===undefined&&route==='/api/columns')return copy({...data.columns,lines:data.columns.lines.map(l=>({...l,has_history:!!data.states[l.id],running:false}))})
   if(body===undefined&&route==='/api/topics')return {columns:await Promise.all(data.columns.lines.map(l=>request('/api/state?line_id='+l.id))),concurrency:2,revision:data.columns.revision}
   if(body && route==='/api/topics/draft-prompt' && body.action==='open'){

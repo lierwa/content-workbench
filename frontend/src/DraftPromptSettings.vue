@@ -9,7 +9,7 @@ const panel = ref(true), info = ref(null), error = ref(''), working = ref('')
 const autoDraft = ref(false)
 const rules = ref(''), limit = ref(2), sample = ref('custom'), text = ref('')
 const preview = ref(null), showPreview = ref(false), current = ref(null), previous = ref(null)
-const valid = computed(()=>!!rules.value.trim() && Number.isInteger(limit.value) && limit.value >= 1 && limit.value <= 10)
+const valid = computed(()=>!!rules.value.trim() && Number.isInteger(limit.value) && limit.value >= 1 && limit.value <= 50)
 const canTest = computed(()=>valid.value && (sample.value !== 'custom' || !!text.value.trim()))
 function request(action) {
  return api('/api/topics/draft-prompt', {action,line_id:props.line.id,rules:rules.value,limit:limit.value,sample:sample.value,text:sample.value==='custom'?text.value:''})
@@ -39,7 +39,7 @@ async function save() {
  working.value='save';error.value=''
  try {
   await api('/api/topics/automation',{action:'settings',line_id:props.line.id,expected_revision:info.value.revision,
-   settings:{draft_rules:rules.value.trim(),draft_limit:limit.value,...(autoDraft.value!==(info.value.auto_draft??!!props.line.auto_draft)?{auto_draft:autoDraft.value}:{})}})
+   settings:{draft_rules:rules.value.trim(),...(props.line.format==='digest'?{}:{draft_limit:limit.value}),...(autoDraft.value!==(info.value.auto_draft??!!props.line.auto_draft)?{auto_draft:autoDraft.value}:{})}})
   emit('saved');panel.value=false;ElMessage.success('选稿设置已保存')
  }catch(e){error.value=e.message}finally{working.value=''}
 }
@@ -53,7 +53,7 @@ onMounted(load)
    <div class="auto-draft-row"><span>自动选稿并制作</span><el-switch v-model="autoDraft" :disabled="!!working||(line.enabled===false&&!autoDraft)" :aria-label="line.name+'自动选稿并制作'"/></div>
    <div class="rules-head"><label :for="'draft-rules-'+line.id">选稿提示词</label><el-button link :disabled="!!working||rules===info.default_rules" @click="rules=info.default_rules">恢复默认</el-button></div>
    <el-input :id="'draft-rules-'+line.id" v-model="rules" type="textarea" :rows="8" maxlength="10000" aria-label="选稿提示词" :disabled="!!working"/>
-   <div class="limit-row"><span>每轮最多入队</span><el-input-number v-model="limit" :min="1" :max="10" :precision="0" controls-position="right" aria-label="每轮入队上限" :disabled="!!working"/><span>个题</span></div>
+   <div class="limit-row"><span>每轮最多入队</span><el-input-number v-model="limit" :min="1" :max="50" :precision="0" controls-position="right" aria-label="每轮入队上限" :disabled="!!working||line.format==='digest'"/><span>{{line.format==='digest'?'条消息（在栏目中设置）':'篇单稿'}}</span></div>
    <section class="trial-area">
     <div class="rules-head"><h3>试选</h3><el-radio-group v-if="info.sample" v-model="sample" size="small" :disabled="!!working">
      <el-radio-button :value="info.sample">三筛候选</el-radio-button><el-radio-button value="custom">粘贴样稿</el-radio-button>

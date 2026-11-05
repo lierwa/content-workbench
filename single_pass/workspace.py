@@ -1,5 +1,6 @@
 """One shared pool, independent collection, and frozen per-column screening runs."""
 import json
+import copy
 import threading
 import time
 import uuid
@@ -8,7 +9,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
 from . import collect, line_review, pool, review, screen, screening_process, screening_policy as policy
-from . import screen_schedule, ai_settings, topic_records, execution_trace
+from . import screen_schedule, ai_settings, topic_records, execution_trace, production_schedule
 from .draft_selection import DraftSelection
 from .columns import ColumnConfig
 from .collection_settings import CollectionSettings, next_run, schedule_key
@@ -122,6 +123,8 @@ class Workspace:
                     'plan', 'assessment', 'comparison', 'ranking', 'error', 'source_errors', 'batch_id')}
                 compact['materials'] = [{k: m.get(k) for k in ('material_id', 'status', 'title',
                     'publisher', 'url', 'final_url', 'error')} for m in event.get('materials', [])]
+                if self.production:
+                    compact['production'] = self.production.topic_progress(event.get('batch_id') or state['batch']['id'], event['id'], event.get('version'))
                 value['review']['events'].append(compact)
             slot = self.schedule.get('screen_slots', {}).get(line['id'])
             value['next_screen_at'] = slot['next_at'] if slot and slot['plan'] == screen_schedule.for_line(line) and line.get('enabled', True) else None
@@ -348,6 +351,9 @@ class Workspace:
             for line in value['lines']:
                 active = self.workers.get(line['id'])
                 line['running'] = self._active(line['id'])
+                slot = self.schedule.get('production_slots', {}).get(line['id'])
+                line['next_production_at'] = slot.get('deadline') if slot and production_schedule.enabled(line) else None
+                line['production_editions'] = [dict(e, line_snapshot=None) for e in self.schedule.get('production_editions', {}).values() if e['line_id']==line['id']][-5:]
                 line['has_history'] = line['id'] in self.latest or bool(self.production and any(
                     j.get('packet', {}).get('line', {}).get('id') == line['id'] for j in self.production.jobs.values()))
             return value
@@ -653,7 +659,7 @@ class Workspace:
             screen.write_json(root / 'result.json', self.collection)
             screen.write_json(self.data / 'collection.json', self.collection)
 
-    def start_screen(self, batch_id=None, refs=None, line_id=None, format=None, *, runtime_checked=False, prepared=None, scheduled=False, topic_record_id=None):
+    def start_screen(self, batch_id=None, refs=None, line_id=None, format=None, *, runtime_checked=False, prepared=None, scheduled=False, topic_record_id=None, production_occurrence=None, replenish=None):
         if not runtime_checked: screen.check_runtime()
         with self.lock:
             line = self.line(line_id)
@@ -666,7 +672,7 @@ class Workspace:
                 return {'run_id': run_id, 'batch_id': run_id, 'status': read(self.data / run_id / 'batch.json')['status']}
             prior = self.latest.get(line['id'])
             previous = read(self.data / str(prior) / 'batch.json')
-            resume = batch_id and prior == batch_id and previous and previous['status'] in ('partial', 'stopped', 'failed')
+            resume = batch_id and prior == batch_id and previous and (previous['status'] in ('partial', 'stopped', 'failed') or replenish is not None and previous['status']=='completed')
             if resume:
                 root = self._path(batch_id)
                 batch = previous
@@ -674,6 +680,8 @@ class Workspace:
                 if policy.line_hash(line) != policy.line_hash(self.line(line['id'])):
                     raise ValueError('栏目配置已改变，请新开一次筛选')
                 records = read(root / 'input-records.json', {})
+                if replenish is not None:
+                    batch['production_excluded']=list(set(batch.get('production_excluded',[]))|set(replenish))
             else:
                 from . import screening_scope
                 spec = screening_scope.scheduled_spec(self, line) if scheduled else {'line_id': line['id']}
@@ -690,7 +698,8 @@ class Workspace:
                 root = self.data / run_id
                 (root / 'runtime').mkdir(parents=True)
                 edition = int(time.time() // (line['edition_hours'] * 3600))
-                batch = {'id': run_id, 'status': 'ready', 'line': line, 'edition_id': f"{line['id']}:{edition}",
+                batch = {'id': run_id, 'status': 'ready', 'line': line, 'edition_id': production_occurrence or f"{line['id']}:{edition}",
+                         'production_occurrence':production_occurrence,
                          'started_at': collect.now(), 'sources': self.collection['sources'], 'error': None,
                          'scope': plan['scope'], 'topic_record_id': topic_record_id or uuid.uuid4().hex,
                          'trigger': 'automatic' if scheduled else 'manual'}
@@ -704,7 +713,8 @@ class Workspace:
             batch.update(status='queued', error=None)
             screen.write_json(root / 'batch.json', batch)
             cancel = threading.Event()
-            cancel.frozen_at = batch['started_at']
+            cancel.frozen_at = batch.get('input_cutoff_at') or batch['started_at']
+            cancel.excluded_event_ids=batch.get('production_excluded',[])
             cancel.ai_settings_snapshot = ai_settings.freeze(root / 'review', self.data)
             budget = policy.config().get('budget_seconds')
             cancel.deadline = time.monotonic() + budget if budget else None
@@ -716,6 +726,18 @@ class Workspace:
             worker = self.screen_executor.submit(self._screen, root, line, records, cancel)
             self.workers[line['id']] = (worker, cancel)
             return {'run_id': root.name, 'batch_id': root.name, 'status': 'queued', 'record_id': topic_records.record_id(batch)}
+
+    def can_replenish(self, batch_id, excluded=()):
+        value=read(self._path(batch_id)/'review'/'state.json',{})
+        for event in value.get('events',[]):
+            if (event['id'] in excluded or event.get('production_excluded') or event.get('assessment')
+                    or event.get('invalid_model_output') or event.get('model_unavailable')):continue
+            if value.get('refill_exhausted') and not (event.get('plan') or {}).get('selected'):continue
+            rounds=event.get('screening',{}).get('rounds',[])
+            if (any(r['stage']=='initial' and r['decision']=='advance' for r in rounds)
+                    and not any(r['stage']=='selection' and r['decision'] in ('drop','insufficient') for r in rounds)):
+                return True
+        return False
 
     def _screen(self, root, line, records, cancel):
         with self.lock:
@@ -753,7 +775,7 @@ class Workspace:
             screen.write_json(root / 'batch.json', batch)
             runs['runs'][-1].update(finished_at=screen.timestamp(), status=status, error=error, retryable=batch['retryable'])
             screen.write_json(timeline, runs)
-            if status == 'completed' and self.production:
+            if status == 'completed' and self.production and not batch.get('auto_run_stopped'):
                 live_line = self.line(line['id'])
                 if live_line.get('enabled', True) and live_line.get('auto_draft'):
                     self.draft_selection.prepare(live_line, root.name)
@@ -835,6 +857,8 @@ class Workspace:
             return {'ok': True}
 
     def _tick(self):
+        from . import autoproduction
+        autoproduction.tick(self)
         config = self.config()
         now = time.time()
         settings = self.collection_settings.read()
@@ -849,28 +873,37 @@ class Workspace:
                 except ValueError as exc:
                     self.schedule['collection_error'] = str(exc)
             self.schedule['collection_next_at'] = next_run(settings, now)
+        production_schedule.tick(self, config['lines'], now)
+        if self.production and self.production.lock.acquire(blocking=False):
+            try:
+                pending=[copy.deepcopy(j) for j in self.production.jobs.values() if j.get('digest_replenishment')
+                         and j['id'] not in self.production.running and j['status']=='needs_attention']
+            finally:self.production.lock.release()
+            for job in pending:self.draft_selection.replenish_job(job)
         occurrences = {}
         for line in config['lines']:
             slot = self._screen_slot(line, now)
             if not line.get('enabled', True): continue
-            if line.get('auto_draft') and self.production:
+            if (line.get('auto_draft') or production_schedule.enabled(line)) and self.production:
                 run_id = self.latest.get(line['id'])
                 if run_id and self.schedule.get('draft:' + line['id']) != run_id:
                     batch = read(self.data / run_id / 'batch.json', {})
-                    if batch.get('status') == 'completed':
-                        self.draft_selection.prepare(line, run_id)
+                    if batch.get('status') == 'completed' and not batch.get('auto_run_stopped') and (line.get('auto_draft') or batch.get('production_occurrence')):
+                        occurrence = self.schedule.get('production_editions', {}).get(batch.get('production_occurrence'))
+                        if not occurrence or (occurrence['status'] == 'preparing' and now < occurrence['deadline']):
+                            self.draft_selection.prepare(occurrence['line_snapshot'] if occurrence else line, run_id)
                 self.draft_selection.dispatch(line)
             key = 'screen:' + line['id']
             previous = self.latest.get(line['id'])
             prior = read(self.data / str(previous) / 'batch.json')
-            if (prior and prior['status'] == 'partial' and prior.get('auto_resume')
+            if (prior and not prior.get('auto_run_stopped') and prior['status'] == 'partial' and prior.get('auto_resume')
                     and prior.get('automatic_retries', 0) < 2 and now >= prior.get('retry_not_before', 0)
                     and policy.line_hash(prior['line']) == policy.line_hash(line) and not self._active(line['id'])):
                 prior['automatic_retries'] = prior.get('automatic_retries', 0) + 1
                 screen.write_json(self.data / previous / 'batch.json', prior)
                 self.start_screen(batch_id=previous, line_id=line['id'])
                 continue
-            if slot and slot['next_at'] <= now:
+            if slot and not production_schedule.enabled(line) and slot['next_at'] <= now:
                 occurrence = slot['next_at']
                 record = occurrences.setdefault(occurrence, uuid.uuid4().hex)
                 # Claim this occurrence before dispatch, including busy or stopped columns.

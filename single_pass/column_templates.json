@@ -1,0 +1,32 @@
+{
+  "single": {
+    "min_items": 1,
+    "target_items": 1,
+    "max_items": 1,
+    "shortage": "hold",
+    "item_min_chars": 0,
+    "item_max_chars": 0,
+    "max_paragraphs": 0,
+    "item_headings": false,
+    "structure": "围绕本篇具体读者问题独立组织已核实事实，说明最新变化、必要背景与实际影响。不强求长文、观点或固定小标题。",
+    "body_images": "optional",
+    "max_body_images": 6,
+    "cover": "source_or_default",
+    "max_images_per_item": 6
+  },
+  "digest": {
+    "min_items": 8,
+    "target_items": 10,
+    "max_items": 12,
+    "shortage": "hold",
+    "item_min_chars": 0,
+    "item_max_chars": 0,
+    "max_paragraphs": 0,
+    "item_headings": true,
+    "structure": "一条独立消息一节，用短标题和简明正文交代发生什么、关键事实和必要限定。篇幅随信息量，不为了字数凑段；一般一段能讲清就一段。按重要性编排，总标题体现栏目与本期消息，不加通用导语或总结。",
+    "body_images": "essential",
+    "max_body_images": 10,
+    "cover": "default",
+    "max_images_per_item": 1
+  }
+}

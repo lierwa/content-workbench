@@ -114,7 +114,7 @@ class App:
             initial_total = len(json.loads(input_path.read_text(encoding='utf-8'))) if input_path.exists() else len(items)
             return {'screening_policy': {'version': policy.config()['version'], 'hash': policy.policy_hash()},
                     'validation': batch.get('validation'),
-                    'status': batch['status'], 'batch': {k: batch.get(k) for k in ('id', 'started_at', 'finished_at', 'sources', 'screening_refs')},
+                    'status': batch['status'], 'batch': {k: batch.get(k) for k in ('id', 'started_at', 'finished_at', 'sources', 'screening_refs', 'production_occurrence')},
                     'items': items, 'results': results,
                     'progress': {'completed': len(results), 'total': initial_total}, 'error': batch.get('error'),
                     'excluded_sources':excluded,'review':review.view(self._dir(),sum(policy.advanced(value) for value in results))}
@@ -413,6 +413,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._respond(200, result)
             except (ValueError, TypeError) as exc:
                 return self._respond(404, {'error': str(exc)})
+        if path == '/api/production-run':
+            from . import autoproduction
+            with self.server.app.lock:
+                return self._respond(200, {'run':autoproduction.snapshot(self.server.app)})
         if path == '/api/columns':
             try: return self._respond(200, self.server.app.columns())
             except ValueError as exc: return self._respond(409, {'error': str(exc)})
@@ -502,7 +506,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._production_write(path, 'POST')
         if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
             return self._respond(415, {'error': '需要 JSON 请求'})
-        if path not in ('/api/ai-settings', '/api/topics/draft-prompt', '/api/topics/automation', '/api/collect', '/api/collection/settings', '/api/screen', '/api/screen/batch', '/api/screen/schedule', '/api/screen/preview', '/api/screen/start', '/api/stop', '/api/rank'):
+        if path not in ('/api/production-run', '/api/ai-settings', '/api/topics/draft-prompt', '/api/topics/automation', '/api/collect', '/api/collection/settings', '/api/screen', '/api/screen/batch', '/api/screen/schedule', '/api/screen/preview', '/api/screen/start', '/api/stop', '/api/rank'):
             return self._respond(404, {'error': '接口不存在'})
         try:
             size = int(self.headers.get('Content-Length', '0'))
@@ -512,7 +516,10 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(size) or b'{}')
             if not isinstance(body, dict):
                 raise ValueError('请求格式无效')
-            if path == '/api/ai-settings':
+            if path == '/api/production-run':
+                from . import autoproduction
+                result=autoproduction.start(self.server.app,body)
+            elif path == '/api/ai-settings':
                 from . import ai_settings
                 result = ai_settings.save(self.server.app.data, body)
             elif path == '/api/collect':

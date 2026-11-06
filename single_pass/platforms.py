@@ -18,6 +18,24 @@ PLATFORMS = {"wechat": "微信公众号", "toutiao": "今日头条"}
 _BROWSER_THREAD_LOCK = threading.RLock()
 
 
+def original_browser_route(item):
+    """Both session preflight and dispatch use the same supported URL shapes."""
+    url = item.get('entry_url') or item.get('url') or item.get('original_url') or ''
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return None, None
+    if parsed.hostname in ('www.toutiao.com', 'www.baidu.com', 's.weibo.com'):
+        return 'news', None
+    if parsed.hostname in ('36kr.com', 'www.36kr.com') and re.fullmatch(r'/(?:p|newsflashes)/\d+/?', parsed.path):
+        return 'publisher', None
+    if parsed.hostname == 'www.zhihu.com':
+        question = re.fullmatch(r'/question/(\d+)(?:/answer/\d+)?/?', parsed.path)
+        if question:
+            return 'question', question
+    return None, None
+
+
 def _safe_bsk_error(value):
     """Keep error context but never retain URLs with queries or credential values."""
     lines = []
@@ -586,13 +604,12 @@ class PlatformAdapter:
         from . import materials, screening_policy as policy, screen
         row = materials.source_defaults(item)
         entry = row['entry_url'] or row.get('original_url') or ''
-        parsed = urlsplit(entry)
-        question = re.fullmatch(r'/question/(\d+)(?:/answer/\d+)?/?', parsed.path)
-        if parsed.hostname in ('www.toutiao.com','www.baidu.com','s.weibo.com'):
+        route, question = original_browser_route(row)
+        if route == 'news':
             return self._read_news_entry(item, cancel)
-        if parsed.hostname in ('36kr.com', 'www.36kr.com') and re.fullmatch(r'/(?:p|newsflashes)/\d+/?', parsed.path):
+        if route == 'publisher':
             return self._read_publisher_article(item, cancel)
-        if parsed.hostname != 'www.zhihu.com' or not question:
+        if route != 'question':
             return materials.resolve_original(item, cancel)
         row['resolution_attempt'] = {'fetched_at':screen.timestamp(), 'status':'failed', 'method':'browser'}
         with _BrowserProcessLock(timeout=policy.remaining(cancel)):

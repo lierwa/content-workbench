@@ -6,8 +6,8 @@ import ScreenRunDialog from './ScreenRunDialog.vue'
 const router=useRouter()
 const data=ref({records:[],columns:[],total:0,page_size:20}),page=ref(1),trigger=ref(''),search=ref('')
 const loading=ref(true),error=ref(''),open=ref(false),runOnce=ref(false),productionRun=ref(null),starting=ref(false)
-const activeStates=['collecting','screening','producing','collecting_more']
-const runLabels={collecting:'采集中',collecting_more:'自动补采中',screening:'筛选与补筛中',producing:'制作与审稿中',completed:'已全部出稿',failed:'本轮未完成'}
+const activeStates=['collecting','screening','producing','collecting_more','syncing']
+const runLabels={collecting:'采集中',collecting_more:'自动补采中',screening:'筛选与补筛中',producing:'制作与审稿中',syncing:'同步并核对平台草稿',completed:'已全部出稿',failed:'本轮未完成'}
 let timer,disposed=false,sequence=0
 const labels={screening:'筛选中',queued:'排队中',completed:'已完成',partial:'部分完成',failed:'失败',stopped:'已停止',ended:'已结束',ready:'待处理'}
 const stamp=value=>value?new Date(value).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}):'—'

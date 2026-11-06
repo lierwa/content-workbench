@@ -145,6 +145,7 @@ export class ExtensionBridge {
 
         if (req.method === 'POST' && req.url === '/request') {
           let body = ''
+          req.setEncoding('utf8')
           req.on('data', chunk => body += chunk)
           req.on('end', async () => {
             try {
@@ -316,6 +317,7 @@ export class ExtensionBridge {
 
       const req = http.request(options, (res) => {
         let body = ''
+        res.setEncoding('utf8')
         res.on('data', chunk => body += chunk)
         res.on('end', () => {
           try {
@@ -469,6 +471,7 @@ export class ExtensionBridge {
 
       const req = http.request(options, (res) => {
         let body = ''
+        res.setEncoding('utf8')
         res.on('data', chunk => body += chunk)
         res.on('end', () => {
           try {

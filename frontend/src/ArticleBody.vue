@@ -3,7 +3,7 @@ import { computed, h } from 'vue'
 import { isPrototype } from './api'
 const props=defineProps({html:{type:String,default:''}})
 const tags=new Set('section div span p br h1 h2 h3 h4 h5 h6 blockquote strong b em i u s del sub sup mark a img figure figcaption ul ol li pre code hr table thead tbody tr th td'.split(' '))
-const styles=new Set('font-size font-weight font-style line-height color background-color text-align text-decoration letter-spacing text-indent margin margin-top margin-bottom padding border-left border-color border-width border-style'.split(' '))
+const styles=new Set('font-size font-weight font-style line-height color background-color display text-align text-decoration text-decoration-line text-decoration-style text-decoration-color text-underline-offset letter-spacing text-indent margin margin-top margin-bottom padding border-left border-color border-width border-style'.split(' '))
 function webUrl(value){try{const u=new URL(value);return ['http:','https:'].includes(u.protocol)&&!u.username&&!u.password?u.href:null}catch{return null}}
 function nodes(root){return [...root.childNodes].flatMap(node=>{
   if(node.nodeType===Node.TEXT_NODE)return [node.textContent]

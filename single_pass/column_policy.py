@@ -7,9 +7,15 @@ from lxml import html as lhtml
 
 STAGES = ('research', 'editing', 'review', 'images', 'layout')
 
+# Running older servers reread column_templates.json when validating saved columns.
+# Keep that schema intact and load the current server's additions once at startup.
+_BASE_TEMPLATES = json.loads(Path(__file__).with_name('column_templates.json').read_text(encoding='utf-8'))
+_TITLE_DEFAULTS = json.loads(Path(__file__).with_name('column_title_defaults.json').read_text(encoding='utf-8'))
+_FORMAT_TEMPLATES = {form: {**base, 'title_style': _TITLE_DEFAULTS[form]} for form, base in _BASE_TEMPLATES.items()}
+
 
 def templates():
-    return json.loads(Path(__file__).with_name('column_templates.json').read_text(encoding='utf-8'))
+    return copy.deepcopy(_FORMAT_TEMPLATES)
 
 
 def editorial_template(form):
@@ -23,7 +29,7 @@ def target_count(line):
 
 def settings(line):
     line = line or {}
-    return copy.deepcopy({**templates()[line.get('format','single')],**(line.get('format_policy') or {})})
+    return copy.deepcopy({**_FORMAT_TEMPLATES[line.get('format','single')],**(line.get('format_policy') or {})})
 
 
 def screening_settings(line):
@@ -32,7 +38,10 @@ def screening_settings(line):
 
 
 def defaults(line):
+    if 'format_policy' in line and not isinstance(line['format_policy'], dict):
+        raise ValueError('成稿形式配置须为对象')
     line.setdefault('format_policy', settings(line))
+    line['format_policy'].setdefault('title_style', _TITLE_DEFAULTS[line['format']])
     line['format_policy'].setdefault('max_images_per_item',1 if line.get('format')=='digest' else line['format_policy'].get('max_body_images',6))
     line.setdefault('production_rules', {stage: '' for stage in STAGES})
     line.setdefault('production_schedule', {'mode': 'off', 'prepare_minutes': 60, 'delivery': 'local'})
@@ -42,7 +51,7 @@ def defaults(line):
 def validate(line):
     defaults(line)
     p = line['format_policy']
-    if not isinstance(p, dict) or set(p) != set(templates()['single']):
+    if not isinstance(p, dict) or set(p) != set(_FORMAT_TEMPLATES[line['format']]):
         raise ValueError('成稿形式配置不完整')
     for key, low, high in [('min_items', 1, 50), ('target_items', 1, 50), ('max_items', 1, 50),
                             ('item_min_chars', 0, 10000), ('item_max_chars', 0, 10000),
@@ -57,6 +66,8 @@ def validate(line):
         raise ValueError('每条最少字数不能超过最多字数')
     if p['shortage'] not in ('hold', 'allow') or p['body_images'] not in ('none', 'optional', 'essential') or p['cover'] not in ('source_or_default', 'default'):
         raise ValueError('不足处理或配图策略无效')
+    if p['title_style'] not in (('lead', 'headlines') if line['format'] == 'digest' else ('lead',)):
+        raise ValueError('标题样式不适用于当前成稿形式')
     if type(p['item_headings']) is not bool or not isinstance(p['structure'], str) or len(p['structure']) > 10000:
         raise ValueError('正文结构要求无效')
     if line['format'] == 'digest' and not p['item_headings']:
@@ -100,12 +111,29 @@ def context(line, stage):
     profile = editorial_template(data['format'])
     data['writing_rules'] = data['writing_rules'] or profile['writing_rules']
     data['stage_rules'] = data['stage_rules'] or profile['production_rules'].get(stage, '')
+    if stage in ('writing', 'editing', 'review', 'layout'):
+        data['共同编辑规则'] = ('二创正文不用中英文分号，用短句。同一个问题从事实转到原因、影响、条件或办理方式时可以另起一段。'
+            '只有多个子问题各自值得用几段展开时才分章。有先后推进或顺序操作才编号，平行话题只用小标题。'
+            '简报一条消息一个小标题，不逐条编号。只有确实存在不同栏目组时才给组起名。'
+            '正文只写 Markdown，强调和下划线交给排版步骤。标题、摘要、正文、图注只写给读者。'
+            '交代是谁报道、主张或测得了什么。不要把对写作者的取材说明、待补提示、审稿意见或排版标记印在成稿中。')
+        if stage == 'layout':
+            data['共同编辑规则'] += '加粗标核心消息，下划线标容易漏读的条件、例外或期限，两者不叠加，都可不用。'
+        if stage == 'review':
+            data['共同编辑规则'] += ('通读标题、摘要、各段和图片说明。逐句判断这句话在向谁说、说了什么。'
+                '若它只说明作者手头有什么资料、怎样处理这一段、下一步怎么改，即使没有编辑标签，也须退修并指出原句和所在字段。'
+                '若它说明消息是谁发布的、实验在哪些条件下有效、当事人尚未回应，保留这些对读者有用的边界。'
+                '不要按某个词判稿。引用的原话、代码示例和对编辑行业本身的报道也按实际语境判断。')
     return ('\n栏目制作契约（编辑取舍、形式和表达以此为准；不覆盖事实与平台硬约束）：\n'
             + json.dumps(data, ensure_ascii=False) + '\n')
 
 
-def format_issues(packet, body):
+def format_issues(packet, body, draft=None):
     """Enforce declared structure; semantic topic/entry binding remains independent review."""
+    from .article_renderer import reader_issues
+    problems = reader_issues(dict(draft or {}, body_html=body))
+    if problems:
+        return problems
     if not (packet.get('line') or {}).get('format_policy'):
         return []  # Historical manuscripts retain their frozen acceptance contract.
     line = packet['line']
@@ -117,10 +145,12 @@ def format_issues(packet, body):
             return [shortage]
         sections, current = [], None
         for node in tree.iter():
-            if node.tag == 'h2':
+            if node.tag == 'h1':
+                current = None
+            elif node.tag == 'h2':
                 current = []
                 sections.append(current)
-            elif node.tag in ('p', 'li', 'h1', 'h3', 'h4', 'blockquote') and node.text_content().strip():
+            elif node.tag in ('p', 'li', 'h3', 'h4', 'blockquote') and node.text_content().strip():
                 if current is None:
                     return ['集合正文应直接从第一条消息的二级小标题开始，不加通用导语']
                 current.append(node.text_content().strip())

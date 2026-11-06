@@ -13,6 +13,7 @@ const stages = [['research','补证要求'],['editing','返修要求'],['review'
   </div>
   <div v-if="section==='format'">
     <template v-if="form.format==='digest'">
+      <el-form-item label="整期标题"><el-radio-group v-model="form.format_policy.title_style"><el-radio value="headlines">并列两至三条消息</el-radio><el-radio value="lead">以头条消息命名</el-radio></el-radio-group></el-form-item>
       <div class="policy-grid">
         <el-form-item label="最少消息数"><el-input-number v-model="form.format_policy.min_items" :min="2" :max="50" :precision="0" aria-label="最少消息数" /></el-form-item>
         <el-form-item label="目标消息数"><el-input-number v-model="form.format_policy.target_items" :min="2" :max="50" :precision="0" aria-label="目标消息数" /></el-form-item>

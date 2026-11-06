@@ -156,11 +156,11 @@ class App:
             responses = {}
             quota, extra = divmod(batch['collection_limit'], len(collect.SOURCES))
             for source_index, (source, name) in enumerate(collect.SOURCES.items()):
-                key = 'tophub' if source in ('weibo', 'zhihu') else source
                 try:
+                    key = collect.snapshot_key(source)
                     if key not in responses:
                         try:
-                            raw = collect.fetch(collect.URLS[key])
+                            raw = collect.fetch(collect.URLS[source])
                             filename = key + ('.html' if key in ('baidu', 'tophub') else '.json')
                             (self._dir() / 'snapshots' / filename).write_text(raw, encoding='utf-8')
                             responses[key] = (raw, None, collect.now())
@@ -605,7 +605,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._respond(200, service.remove_entries(entries.group(1), body.get('remove_ids'), self._revision(body.get('expected_revision'))))
             if job and method == 'PATCH':
                 changes = body.get('changes')
-                if not isinstance(changes, dict) or not changes or not set(changes) <= {'title', 'summary', 'body_html', 'theme', 'work_statements', 'first_publish', 'original', 'target_account_id', 'presentation_mode', 'cover_url'}:
+                if not isinstance(changes, dict) or not changes or not set(changes) <= {'title', 'summary', 'body_html', 'theme', 'work_statements', 'first_publish', 'original', 'target_account_id', 'presentation_mode', 'cover_url','cover_text'}:
                     raise TypeError('changes 包含不支持的字段')
                 if 'cover_url' in changes and changes['cover_url'] is not None:
                     raise TypeError('移除封面须设为空；替换须通过上传接口')
@@ -647,7 +647,10 @@ class Handler(BaseHTTPRequestHandler):
                 presentation_mode = body.get('presentation_mode')
                 if platform not in ('local', 'wechat', 'toutiao') or theme not in ('simple', 'default') or not isinstance(html, str) or presentation_mode not in (None, 'toutiao_native') or (presentation_mode == 'toutiao_native' and platform != 'toutiao'):
                     raise TypeError('预览需要有效平台、主题和正文')
-                result = service.preview(platform, theme, html, presentation_mode)
+                cover_url = body.get('cover_url')
+                if cover_url is not None and (not isinstance(cover_url,str) or not cover_url.startswith('/api/production/media/')):
+                    raise TypeError('预览封面地址无效')
+                result = service.preview(platform, theme, html, presentation_mode, cover_url)
             elif path == '/api/production/batch':
                 result = service.create_batch(body.get('selections'), body.get('targets', []))
             elif path == '/api/production/jobs':

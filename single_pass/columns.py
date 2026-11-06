@@ -26,6 +26,8 @@ class ColumnConfig:
         value.setdefault('revision', 0)
         if not isinstance(value.get('sources'), dict) or not value['sources']:
             raise ValueError('来源配置为空')
+        for source_id in collect.SOURCES:
+            value['sources'].setdefault(source_id, {'enabled': False, 'interval_minutes': None})
         for source_id, source in value['sources'].items():
             if source_id not in collect.PARSERS or source_id not in collect.SOURCES:
                 raise ValueError('来源缺少采集适配器')
@@ -38,7 +40,9 @@ class ColumnConfig:
             if not re.fullmatch(r'[a-z][a-z0-9_-]{0,63}', str(line.get('id', ''))) or line['id'] in ids:
                 raise ValueError('栏目编号无效或重复')
             ids.add(line['id'])
-            original = next((x for x in defaults['lines'] if x['id']==line['id'] and x['mode']==line['mode']), {})
+            original = next((x for x in defaults['lines'] if x['id'] == line['id']), {})
+            line.setdefault('parent_name', original.get('parent_name', ''))
+            line.setdefault('reader_motives', list(original.get('reader_motives', [])))
             line.setdefault('screening_rules', copy.deepcopy(screening_template(line['format'])))
             line.setdefault('max_candidates', 20 if line['format']=='digest' else 2)
             self.validate(line, value)
@@ -54,8 +58,20 @@ class ColumnConfig:
 
     @classmethod
     def validate(cls, line, config):
-        if not isinstance(line.get('name'), str) or not 1 <= len(line['name'].strip()) <= 40:
-            raise ValueError('栏目名称须为 1 至 40 字')
+        if (not isinstance(line.get('name'), str) or not 1 <= len(line['name'].strip()) <= 40 or
+                len(line['name'].strip().splitlines()) != 1):
+            raise ValueError('栏目名称须为 1 至 40 字的单行文字')
+        parent = line.get('parent_name', '')
+        if not isinstance(parent, str) or len(parent.strip()) > 40 or len(parent.splitlines()) > 1:
+            raise ValueError('上级栏目须为 40 字以内的单行文字')
+        line['parent_name'] = parent.strip()
+        motives = line.get('reader_motives', [])
+        if (not isinstance(motives, list) or len(motives) > 20 or
+                any(not isinstance(m, str) or not 1 <= len(m.strip()) <= 40 for m in motives)):
+            raise ValueError('读者动机最多 20 项，每项 1 至 40 字')
+        line['reader_motives'] = [m.strip() for m in motives]
+        if len(set(line['reader_motives'])) != len(motives):
+            raise ValueError('读者动机不能重复')
         if line.get('mode') not in ('hotspot', 'digest') or line.get('format') not in ('single', 'digest'):
             raise ValueError('筛选方式或成稿形式无效')
         sources = line.get('sources')
@@ -117,7 +133,7 @@ class ColumnConfig:
     def save_line(self, payload, line_id=None):
         config = self.read()
         self.expected(config, payload.get('expected_revision'))
-        allowed = {'name', 'sources', 'rules', 'screening_rules', 'max_candidates', 'writing_rules', 'format', 'mode', 'valid_hours', 'edition_hours',
+        allowed = {'name', 'parent_name', 'reader_motives', 'sources', 'rules', 'screening_rules', 'max_candidates', 'writing_rules', 'format', 'mode', 'valid_hours', 'edition_hours',
                    'reference_domains', 'interval_minutes', 'targets', 'auto_draft', 'draft_limit', 'draft_rules', 'enabled', 'format_policy', 'production_rules', 'production_schedule'}
         changes = payload.get('column')
         if not isinstance(changes, dict) or set(changes) - allowed:

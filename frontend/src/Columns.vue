@@ -54,7 +54,7 @@ async function save(){
   if(!form.value.rules.trim()){fieldError.value='请填写栏目定位与范围';formTab.value='content';return}
   for(const [key,label] of [['initial','初筛'],['selection','二筛'],['verification','三筛']])if(!form.value.screening_rules?.[key]?.trim()){fieldError.value=`请填写${label}规则`;formTab.value='screening';return}
   pending.value=true
-  const fields=['name','sources','rules','screening_rules','max_candidates','writing_rules','mode','format','valid_hours','edition_hours','reference_domains','targets','auto_draft','draft_limit','draft_rules','production_rules','format_policy','production_schedule']
+  const fields=['name','parent_name','reader_motives','sources','rules','screening_rules','max_candidates','writing_rules','mode','format','valid_hours','edition_hours','reference_domains','targets','auto_draft','draft_limit','draft_rules','production_rules','format_policy','production_schedule']
   try{await api('/api/columns'+(editingId.value?'/'+editingId.value:''),{expected_revision:revision.value,column:Object.fromEntries(fields.map(k=>[k,form.value[k]]))},editingId.value?'PATCH':'POST');editing.value=false;await refresh();ElMessage.success('栏目已保存')}
   catch(e){fieldError.value=e.message}finally{pending.value=false}
 }
@@ -125,6 +125,7 @@ onMounted(refresh)
     <el-form label-position="top" @submit.prevent="save">
       <div v-show="formTab==='content'">
         <el-form-item label="栏目名称" required><el-input v-model="form.name" aria-label="栏目名称" maxlength="40" /></el-form-item>
+        <el-form-item label="上级栏目"><el-input v-model="form.parent_name" aria-label="上级栏目" maxlength="40" placeholder="可选" /></el-form-item>
         <el-form-item label="渠道" required><el-checkbox-group v-model="form.sources" class="channel-picker"><el-checkbox v-for="s in data.sources" :key="s.id" :value="s.id">{{s.name}}<span v-if="!s.enabled" class="muted">（已停用）</span></el-checkbox></el-checkbox-group></el-form-item>
         <el-form-item label="栏目定位与范围" required><el-input v-model="form.rules" aria-label="栏目定位与范围" type="textarea" :rows="3" maxlength="10000" /></el-form-item>
         <div class="form-grid"><el-form-item label="成稿形式"><el-select v-model="form.format" aria-label="成稿形式" @change="changeFormat"><el-option label="单篇" value="single"/><el-option label="集合稿" value="digest"/></el-select></el-form-item></div>
@@ -132,6 +133,7 @@ onMounted(refresh)
         <el-form-item label="目标账号"><el-checkbox-group v-model="accountIds" class="account-picker"><el-checkbox v-for="a in accounts" :key="a.id" :value="a.id">{{a.platform==='wechat'?'公众号':'今日头条'}} · {{a.identity?.name||a.display_name}}</el-checkbox></el-checkbox-group><RouterLink v-if="!accounts.length" to="/accounts">添加账号</RouterLink></el-form-item>
       </div>
       <div v-show="formTab==='screening'">
+        <el-form-item v-if="form.format==='single'" label="读者动机"><el-select v-model="form.reader_motives" multiple filterable allow-create default-first-option :multiple-limit="20" aria-label="读者动机" placeholder="可选，输入后按回车添加" /></el-form-item>
         <el-form-item label="初筛规则" required><el-input v-model="form.screening_rules.initial" aria-label="初筛规则" type="textarea" :rows="4" maxlength="10000" /></el-form-item>
         <el-form-item label="二筛规则" required><el-input v-model="form.screening_rules.selection" aria-label="二筛规则" type="textarea" :rows="4" maxlength="10000" /></el-form-item>
         <el-form-item label="三筛规则" required><el-input v-model="form.screening_rules.verification" aria-label="三筛规则" type="textarea" :rows="4" maxlength="10000" /></el-form-item>

@@ -55,6 +55,8 @@ class Workspace:
             if batch and batch['status'] in ('screening', 'queued'):
                 batch.update(status='partial', retryable=True, auto_resume=True, retry_not_before=time.time()+5, error='上次筛选中断，等待恢复原运行')
                 screen.write_json(self.data / run_id / 'batch.json', batch)
+            elif batch and batch['status'] == 'stopped':
+                self.draft_selection.cancel(batch['line']['id'], batch_id=run_id)
 
     def config(self):
         return self.column_config.read()
@@ -626,15 +628,20 @@ class Workspace:
                 amount = quota + int(index < extra) if quota is not None else None
                 if amount == 0:
                     continue
-                key = 'tophub' if source in ('weibo', 'zhihu') else source
                 result = {'source_id': source, 'name': collect.SOURCES[source], 'count': 0, 'error': None}
                 try:
+                    key = collect.snapshot_key(source)
                     if key not in responses:
-                        raw = collect.fetch(collect.URLS[key])
+                        raw = collect.fetch(collect.URLS[source])
                         (root / (key + '.txt')).write_text(raw, encoding='utf-8')
                         responses[key] = (raw, collect.now())
                     raw, observed = responses[key]
                     rows = collect.PARSERS[source](raw)
+                    available = len(rows)
+                    rows = [r for r in rows if isinstance(r.get('title'), str) and r['title'].strip()
+                            and collect.canonical(r.get('entry_url'))]
+                    if len(rows) != available:
+                        result['invalid_entries'] = available - len(rows)
                     if not rows:
                         raise ValueError('响应为空或未解析到条目')
                     selected = rows[:amount][:per_source_limit]
@@ -680,8 +687,18 @@ class Workspace:
                 if policy.line_hash(line) != policy.line_hash(self.line(line['id'])):
                     raise ValueError('栏目配置已改变，请新开一次筛选')
                 records = read(root / 'input-records.json', {})
+                draft = self.draft_selection.rounds.get(batch_id) or {}
+                if (replenish is None and previous['status']=='stopped' and not batch.get('auto_run_stopped')
+                        and draft.get('status')=='cancelled'):
+                    draft.update(status='replenishing', revision=draft['revision'] + 1)
+                    self.draft_selection.persist()
+                if replenish is None and draft.get('status') == 'replenishing':
+                    # A resumed worker is still filling production seats, not
+                    # starting a fresh count of all verified stories.
+                    replenish = draft.get('excluded_ids', [])
                 if replenish is not None:
                     batch['production_excluded']=list(set(batch.get('production_excluded',[]))|set(replenish))
+                    batch['draft_refill_revision'] = draft.get('revision')
             else:
                 from . import screening_scope
                 spec = screening_scope.scheduled_spec(self, line) if scheduled else {'line_id': line['id']}
@@ -715,6 +732,13 @@ class Workspace:
             cancel = threading.Event()
             cancel.frozen_at = batch.get('input_cutoff_at') or batch['started_at']
             cancel.excluded_event_ids=batch.get('production_excluded',[])
+            if replenish is not None:
+                # Previously verified reserves (and stories unavailable for this
+                # edition) cannot fill an open production seat by themselves.
+                prior_events = read(root / 'review/state.json', {}).get('events', [])
+                picked = set(self.draft_selection.rounds.get(root.name, {}).get('ids', []))
+                cancel.unfilled_draft_ids = {e['id'] for e in prior_events
+                    if (e.get('comparison') or {}).get('selected') and e['id'] not in picked}
             cancel.ai_settings_snapshot = ai_settings.freeze(root / 'review', self.data)
             budget = policy.config().get('budget_seconds')
             cancel.deadline = time.monotonic() + budget if budget else None
@@ -735,7 +759,7 @@ class Workspace:
             if value.get('refill_exhausted') and not (event.get('plan') or {}).get('selected'):continue
             rounds=event.get('screening',{}).get('rounds',[])
             if (any(r['stage']=='initial' and r['decision']=='advance' for r in rounds)
-                    and not any(r['stage']=='selection' and r['decision'] in ('drop','insufficient') for r in rounds)):
+                    and not any(r['stage']=='selection' and (r.get('invalid_model_output') or r['decision'] in ('drop','insufficient')) for r in rounds)):
                 return True
         return False
 
@@ -763,9 +787,11 @@ class Workspace:
         except Exception as exc:
             status, error = 'stopped' if cancel.is_set() else 'partial', getattr(cancel, 'stop_reason', None) or str(exc)
             retryable = not isinstance(exc, ValueError)
-            auto_resume = isinstance(exc, (review.TemporaryModelError, TimeoutError, ConnectionError))
+            auto_resume = review.can_retry_task(exc, cancel)
         with self.lock:
             batch = read(root / 'batch.json')
+            if cancel.is_set() and batch['status'] == 'stopped':
+                status, error, auto_resume = 'stopped', batch.get('error'), False
             batch.update(status=status, error=error, finished_at=collect.now())
             batch['retryable'] = retryable and status == 'partial'
             batch['auto_resume'] = auto_resume and batch['retryable']
@@ -797,7 +823,11 @@ class Workspace:
             worker = self.workers.get(batch['line']['id'])
             if worker:
                 worker[1].set()
-            if (worker and worker[0].cancel()) or batch['status'] == 'partial':
+                worker[0].cancel()
+            record = self.draft_selection.rounds.get(batch_id) or {}
+            stopping_selection = record.get('status') in ('judging','replenishing','ready','failed')
+            if batch['status'] in ('queued','screening','partial') or stopping_selection:
+                self.draft_selection.cancel(batch['line']['id'], batch_id=batch_id)
                 batch.update(status='stopped', auto_resume=False, error='已主动停止，可继续')
                 screen.write_json(self._path(batch_id) / 'batch.json', batch)
         return {'status': 'stopping'}
@@ -886,6 +916,20 @@ class Workspace:
             if not line.get('enabled', True): continue
             if (line.get('auto_draft') or production_schedule.enabled(line)) and self.production:
                 run_id = self.latest.get(line['id'])
+                draft = self.draft_selection.rounds.get(run_id) or {}
+                if run_id and draft.get('status')=='replenishing' and not self._active(line['id']):
+                    batch = read(self.data/run_id/'batch.json', {})
+                    if batch.get('status')=='completed' and not batch.get('auto_run_stopped'):
+                        if batch.get('draft_refill_revision') == draft['revision']:
+                            # Screening finished before the callback was persisted.
+                            self.draft_selection.prepare(line, run_id)
+                        else:
+                            # The intent was saved but its worker never started.
+                            try:
+                                self.start_screen(batch_id=run_id, line_id=line['id'], runtime_checked=True,
+                                                  replenish=draft.get('excluded_ids', []))
+                            except (ValueError, RuntimeError) as exc:
+                                self.draft_selection.fail(draft, 'replenishing', exc)
                 if run_id and self.schedule.get('draft:' + line['id']) != run_id:
                     batch = read(self.data / run_id / 'batch.json', {})
                     if batch.get('status') == 'completed' and not batch.get('auto_run_stopped') and (line.get('auto_draft') or batch.get('production_occurrence')):

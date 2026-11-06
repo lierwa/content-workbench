@@ -14,8 +14,8 @@ MODEL_EFFORTS = {model: EFFORTS[:-1] if model == 'gpt-6-luna' else EFFORTS for m
 GROUPS = [
     ('grouping', '事件归组', [('grouping', '归组')]),
     ('initial', '一筛', [('initial-chunk', '一筛'), ('initial-evidence-repair', '纠错')]),
-    ('selection', '二筛', [('selection', '热点比较'), ('selection-evidence-repair', '热点纠错'), ('digest-selection', '简报比较'), ('digest-selection-repair', '简报纠错')]),
-    ('verification', '三筛', [('assessment', '热点核实'), ('digest-verification', '简报核实')]),
+    ('selection', '二筛', [('selection', '单篇比较'), ('selection-evidence-repair', '单篇纠错'), ('digest-selection', '简报比较'), ('digest-selection-repair', '简报纠错')]),
+    ('verification', '三筛', [('assessment', '单篇核实'), ('digest-verification', '简报核实')]),
     ('topic', '二创选稿', [('draft-selection', '选稿')]),
     ('writer', '写稿与返修', [('production-writing', '写稿'), ('production-editing', '返修')]),
     ('reviewer', '审稿与复审', [('production-adversarial-review', '审稿 / 复审')]),

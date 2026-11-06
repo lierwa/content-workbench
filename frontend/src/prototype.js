@@ -1,16 +1,18 @@
 // Same views as production; all mutations stay in this page's memory.
 import initial from './prototype-data.json'
-import formatTemplates from '../../single_pass/column_templates.json'
+import baseTemplates from '../../single_pass/column_templates.json'
+import titleDefaults from '../../single_pass/column_title_defaults.json'
 import editorialTemplates from '../../single_pass/editorial_templates.json'
 import draftRules from '../../single_pass/draft_selection_rules.txt?raw'
 import { lineSchedule } from './screenSchedule'
 const copy=value=>JSON.parse(JSON.stringify(value))
+const formatTemplates=Object.fromEntries(Object.entries(baseTemplates).map(([form,policy])=>[form,{...policy,title_style:titleDefaults[form]}]))
 const data=copy(initial)
 data.columns.format_templates=copy(formatTemplates)
 data.columns.editorial_templates=copy(editorialTemplates)
 data.columns.screening_templates=Object.fromEntries(Object.entries(editorialTemplates).map(([k,v])=>[k,copy(v.screening_rules)]))
 data.columns.default_draft_rules=draftRules.trim()
-for(const line of data.columns.lines){line.format_policy ||= copy(formatTemplates[line.format]);line.production_rules ||= Object.fromEntries(['research','editing','review','images','layout'].map(k=>[k,'']));line.production_schedule ||= {mode:'off',prepare_minutes:60,delivery:'local'}}
+for(const line of data.columns.lines){line.format_policy={...copy(formatTemplates[line.format]),...line.format_policy};line.production_rules ||= Object.fromEntries(['research','editing','review','images','layout'].map(k=>[k,'']));line.production_schedule ||= {mode:'off',prepare_minutes:60,delivery:'local'}}
 const scene=new URLSearchParams(location.search).get('scene')
 if(scene==='empty'){data.columns.lines=[];data.production={jobs:[],works:[],accounts:[],busy:false};data.states={};data.pool={items:[]}}
 let serial=0

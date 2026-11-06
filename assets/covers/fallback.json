@@ -1,13 +1,33 @@
 {
-  "version": 1,
+  "version": 2,
   "status": "approved",
-  "image": "common-v8-subtle-brand.png",
-  "sha256": "c504e639463fe65d8143619b4f3b6daf43936fa9a6321edb18508b40eafb52af",
   "width": 1860,
   "height": 845,
-  "brand": "薄闻录",
-  "main_text": "热点精选 · 科技简报",
-  "brand_style": "italic_slash_low_contrast",
-  "use": "cover_only_after_original_and_same_event_reports",
-  "selection": "用户选择 subtle-or-no-brand-comparison.png 第一版 A"
+  "use": "cover_only",
+  "text": {
+    "brand": "/ 薄闻录",
+    "topics": "热点 / 新知 / 观察",
+    "headline": "热点精选 · 科技简报",
+    "footer": "N E W S   ·   I N S I G H T"
+  },
+  "image": "plate-blue.png",
+  "sha256": "72a06dace7aaa819eaf9e253c58eeb44bd473303c18bf0454fce152a74f74c86",
+  "colors": {
+    "headline": "#1000b3",
+    "brand": "#597cfa",
+    "topics": "#bccdff",
+    "footer": "#b4c5fa"
+  },
+  "platforms": {
+    "toutiao": {
+      "image": "plate-red.png",
+      "sha256": "66d2b0fdcf9c186e21fdb52ec22e503eb2f08e6e52b9aaf3360d5d570d0766ea",
+      "colors": {
+        "headline": "#ad101e",
+        "brand": "#ff9095",
+        "topics": "#ffe5e2",
+        "footer": "#ffdedf"
+      }
+    }
+  }
 }

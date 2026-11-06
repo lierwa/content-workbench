@@ -19,7 +19,7 @@ npm.cmd --prefix integrations/wechatsync ci --ignore-scripts --no-audit --no-fun
 
 - [官方源码](https://github.com/wechatsync/Wechatsync/tree/42f61e39e214b8d5377d09d788a716defc4abdc0)，GPL-3.0；许可证在 `upstream/LICENSE`。
 - [官方发布包 2.0.9](https://wpics.oss-cn-shanghai.aliyuncs.com/wechatsync-2.0.9.zip?date=20260324)，SHA-256：`dfb191decd63a45063c4f6d8f7687745e5ecebe34363792dd6781b657d69fd29`。公开源码与发布包包含的适配器并不完全相同：本接入用发布包中的公众号和头条适配器，准备脚本验证固定校验和，不追随未知更新。
-- `upstream/ws-bridge.ts` 源自上述提交的 MCP bridge；本地修改为环回地址监听、扩展 Origin 检查、HTTP 请求鉴权和取消通配 CORS。Node 需支持 `--experimental-transform-types`。
+- `upstream/ws-bridge.ts` 源自上述提交的 MCP bridge。本地补丁包括环回地址监听、扩展 Origin 检查、HTTP 请求鉴权、取消通配 CORS，以及 HTTP 请求和转发响应的流式 UTF-8 解码。Node 需支持 `--experimental-transform-types`。
 - `workbench.js` 补齐摘要、封面、已有草稿 ID、图片样式保留、指定任务标签、完整回读和账号一致性。公众号更新同时设置 `sub=update` 和 `AppMsgId`；只传 ID 仍会新建。头条草稿按现行官方页面使用 `save=0`、无广告 `article_ad_type=2`、单图封面 `coverType=2`。头条上传与其上游提交方法一样在已登录页面执行，以使用正常页面请求环境；不处理验证码或绕过登录。
 - Chrome MV3 会挂起闲置服务线程。本地 WebSocket 每 20 秒交换一次心跳，**不请求公众号或头条**；依据 [Chrome 官方说明](https://developer.chrome.com/docs/extensions/how-to/web-platform/websockets)。断线通过 Chrome alarm 恢复。
 
@@ -30,6 +30,8 @@ npm.cmd --prefix integrations/wechatsync ci --ignore-scripts --no-audit --no-fun
 2026-11-03 本机公众号登录有效，但续期返回 `201501`（未授权账号切换）。该状态不能当作续期成功；需重新扫码授权后再核验。切换到当前账号的网页按钮直接返回，不会发出续期请求。WeRSS 的多账号轮换也不能证明单账号已经续期成功。
 
 ## 提交与恢复
+
+升级同步桥时，先在本地回放多字节正文。把“口音”的“音”分别切在第一个、第二个 UTF-8 字节之后，另测四字节字符和全文逐字节分块。主桥收到的 HTML 和转发客户端读回的 HTML 都应与原稿逐字一致。桥代码更新后只需在空闲时重启本地桥，确认扩展已重连。
 
 创建前核对完整草稿列表；同名稿不会被盲目覆盖或重复创建。提交前保存操作 ID、账号、版本及内容哈希。超时或未知结果禁止重新创建；恢复只回读原操作已记录的草稿 ID。原位更新先核对平台稿与上次回读一致，防止覆盖用户在平台的修改。回读核对标题、摘要、正文、图片位置、样式、封面及账号；平台换图地址时比较实际图片内容。
 

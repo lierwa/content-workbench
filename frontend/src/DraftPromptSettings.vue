@@ -69,7 +69,7 @@ onMounted(load)
     <div v-if="current" class="trial-results"><h4>试选结果</h4>
      <article v-for="(v,i) in current.results" :key="v.id"><strong>{{v.title}}</strong>
       <p v-if="previous" class="muted">上次 · {{previous.results[i]?.use}}　{{previous.results[i]?.reason}}</p>
-      <p><b>{{v.use}}</b>　{{v.reason}}</p><blockquote v-if="v.quote">{{v.quote}}</blockquote>
+      <p><b>{{v.use}}</b>　{{v.reason}}</p><blockquote v-for="fact in v.evidence" :key="fact.material_id+fact.quote">{{fact.quote}}</blockquote><blockquote v-if="!v.evidence && v.quote">{{v.quote}}</blockquote>
      </article>
     </div>
    </section>

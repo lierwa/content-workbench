@@ -295,10 +295,9 @@ def resolve_original(item, cancel):
     from . import collect, screening_policy as policy
     row = source_defaults(item)
     entry = row['entry_url'] or ''
-    source_host = urllib.parse.urlsplit(collect.URLS.get(item.get('source_id'), '')).hostname or ''
     entry_host = urllib.parse.urlsplit(entry).hostname or ''
-    publisher_entry = (item.get('source_type') in ('publisher_feed', 'publisher_list') and source_host
-                       and entry_host.removeprefix('www.') == source_host.removeprefix('www.'))
+    publisher_entry = (item.get('source_type') in ('publisher_feed', 'publisher_list') and
+                       collect.is_publisher_host(item.get('source_id'), entry_host))
     target = entry if direct_post(entry) or publisher_entry else None
     evidence = [{'kind': 'collected_direct_link', 'entry_url': entry}] if target else []
     parts = urllib.parse.urlsplit(entry)

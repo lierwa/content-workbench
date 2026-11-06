@@ -90,9 +90,9 @@ def detail(workspace, key):
                      pool={'eligible': len(lookup)}, pending_changes=0,
                      historical=workspace.latest.get(line['id']) != run,
                      has_selection_calls=any((workspace.data / run / 'review/calls').glob('draft-selection-*/status.json')),
-                     draft_rounds=[r for r in workspace.draft_selection.visible(line['id']) if r['batch_id'] == run])
+                     draft_rounds=workspace.draft_selection.visible(line['id'], batch_id=run))
         # The detail belongs to this exact run, not today's pool or other runs.
-        state['batch']['scope'] = batch.get('scope')
+        state['batch'].update(scope=batch.get('scope'), auto_run_stopped=bool(batch.get('auto_run_stopped')))
         state['items'] = [{k: i.get(k) for k in ('ref', 'title', 'source_id', 'source_name', 'url', 'final_url', 'original_status')} for i in state['items']]
         for event in state['review'].get('events', []):
             for material in event.get('materials', []):

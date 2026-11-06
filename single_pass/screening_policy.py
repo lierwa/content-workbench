@@ -30,14 +30,23 @@ def selection_limit(line):
     return value
 
 
+def reader_motives(line):
+    if 'reader_motives' in line:
+        return line['reader_motives']
+    # Old frozen column snapshots still use the configured starting profile.
+    presets = json.loads(Path(__file__).with_name('columns.json').read_text(encoding='utf-8'))
+    return next((row.get('reader_motives', []) for row in presets['lines'] if row['id'] == line.get('id')), [])
+
+
 def stage_hash(line, stage):
     line = line or {}
     from . import column_policy
     return digest({'format':line.get('format', 'single'), 'format_selection': column_policy.screening_settings(line), 'contract': 'column-workflow-6',
         'scope':line.get('rules',''),'stage':stage,'rules':stage_rules(line,stage),
         **({'timeliness_contract':1} if stage=='verification' and line.get('format')=='digest' else {}),
+        **({'reader_motives':reader_motives(line)} if stage=='verification' and line.get('format')!='digest' else {}),
         **({'max_candidates':selection_limit(line)} if stage=='selection' else {}),
-        **({'initial_contract':'compact-evidence-2'} if stage=='initial' else {})})
+        **({'initial_contract':'column-reader-3'} if stage=='initial' else {})})
 
 
 def model_context(line, stage):
@@ -54,21 +63,14 @@ def model_context(line, stage):
     return context
 
 
-def editorial_context():
-    card = Path(__file__).parent.parent / 'accounts' / '首个账号.md'
-    text = card.read_text(encoding='utf-8')
-    return (text.partition('## 方向与形式')[2].partition('## 工作流程与边界')[0] or text).strip()
-
-
 def evidence_schema():
     from .review import obj, S
     return {'type':'array', 'items':obj({'id':S, 'field':S, 'quote':S})}
 
 
-def label_schema():
+def label_schema(motives):
     from .review import obj
-    from .screen import RULES
-    return {'type':'array', 'items':obj({'rule':{'enum':RULES}, 'evidence':evidence_schema()})}
+    return {'type':'array', 'items':obj({'rule':{'enum':motives}, 'evidence':evidence_schema()})}
 
 
 DIMENSIONS = {
@@ -156,8 +158,10 @@ def line_basis(line):
     value.pop('screen_scope', None)
     value.pop('enabled', None)
     value.pop('writing_rules', None)
-    for field in ('format_policy', 'production_rules', 'production_schedule'):
+    for field in ('format_policy', 'production_rules', 'production_schedule', 'parent_name'):
         value.pop(field, None)
+    if not value.get('reader_motives') or line.get('format') == 'digest':
+        value.pop('reader_motives', None)
     from . import column_policy
     value['format_selection'] = column_policy.screening_settings(line)
     if line.get('format') == 'digest':

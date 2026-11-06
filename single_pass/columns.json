@@ -66,6 +66,7 @@
     {
       "id": "hotspots",
       "name": "热点精选",
+      "reader_motives": ["观众想纠正你", "看翻车", "打假", "站队", "蹲后续", "当军师", "代入自己", "证明自己"],
       "mode": "hotspot",
       "format": "single",
       "sources": [
@@ -120,6 +121,7 @@
     {
       "id": "tech_digest",
       "name": "科技简报",
+      "parent_name": "热点精选",
       "mode": "digest",
       "format": "digest",
       "sources": [

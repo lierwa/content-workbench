@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 _guard = threading.RLock()
 _process = None
@@ -125,6 +125,51 @@ class Publisher:
             self.adapter._bsk('navigate', 'https://' + host + '/', '--session', session, '--tab-id', str(tab['tab_id']))
         return {'tabId': int(tab['tab_id']), 'windowId': int(self.adapter._persistent_browser_session['agent_window_id'])}
 
+    def leave_toutiao_editor(self, tab, draft_id):
+        """Keep the old editor's autosave from replacing an in-place update."""
+        session = self.adapter._persistent_browser_session['session_id']
+        target = ('--session', session, '--tab-id', str(tab['tabId']))
+
+        editor_title = '[placeholder="请输入文章标题（2～30个字）"]'
+        home_account = 'a[href*="www.toutiao.com/c/user/"]'
+
+        def page():
+            tabs = json.loads(self.adapter._bsk('tab','list','--scope','agent','--session',session,'--json'))['tabs']
+            current = next((t for t in tabs if str(t['tab_id']) == str(tab['tabId'])), None)
+            url = urlsplit((current or {}).get('url',''))
+            if url.hostname != 'mp.toutiao.com':
+                raise ValueError('头条任务页已改变，已停止提交')
+            if url.path not in ('/profile_v4/graphic/publish','/profile_v4/index'):
+                return url
+            scope = editor_title if url.path == '/profile_v4/graphic/publish' else home_account
+            # The SPA changes the URL before it mounts the new page's controls.
+            self.adapter._bsk('wait-for-element',scope,'--state','attached','--timeout','12s',*target,'--json')
+            result = json.loads(self.adapter._bsk('evaluate', '--json', *target,
+                '--depends-on', scope,
+                'JSON.stringify({url:location.href, pending:!!localStorage.getItem("mpdraft")})', read_only=True))
+            if not result.get('ok'):
+                raise ValueError('无法核对本轮头条编辑页')
+            value = result['value']
+            state = json.loads(value) if isinstance(value, str) else value
+            observed = urlsplit(state['url'])
+            if observed != url or state['pending']:
+                raise ValueError('头条账号页已改变或有待恢复的本地草稿，已停止提交')
+            return url
+
+        url = page()
+        if url.path == '/profile_v4/graphic/publish':
+            if parse_qs(url.query).get('pgc_id') != [str(draft_id)]:
+                raise ValueError('头条当前编辑页与已核对的原稿不符')
+            self.adapter._bsk('navigate', 'https://mp.toutiao.com/', *target, '--depends-on', editor_title)
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                url = page()
+                if url.path == '/profile_v4/index':
+                    return
+                time.sleep(.3)
+        if url.path != '/profile_v4/index':
+            raise ValueError('头条原稿编辑页尚未退出，已停止提交')
+
     @staticmethod
     def data_image(path, expected):
         path = Path(path)
@@ -196,8 +241,11 @@ class Publisher:
                         'userId': auth['userId'], 'title': snapshot['title']})
                     if found['drafts']:
                         raise ValueError('平台已有同名草稿，须核对已有记录后更新，未重复新建')
+                tab = self.tab(account)
+                if remote and account['platform'] == 'toutiao':
+                    self.leave_toutiao_editor(tab, remote['draft_id'])
                 params = {'platform': self.platform(account), 'userId': auth['userId'], 'draftOnly': True,
-                    'article': article, 'draftId': (remote or {}).get('draft_id'), **self.tab(account)}
+                    'article': article, 'draftId': (remote or {}).get('draft_id'), **tab}
                 journal = {'binding': binding, 'phase': 'submitting', 'account_identity': identity,
                     'existing_draft_id': snapshot.get('existing_draft_id')}
                 screen.write_json(journal_path, journal)

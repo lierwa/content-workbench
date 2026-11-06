@@ -4,7 +4,7 @@ import { computed } from 'vue'
 const props = defineProps({ state: Object, saving: Boolean, readonly: Boolean })
 const emit = defineEmits(['change'])
 const line = computed(() => props.state.line)
-const rounds = computed(() => (props.state.draft_rounds || []).filter(r=>r.method==='ai' && r.status!=='cancelled'))
+const rounds = computed(() => (props.state.draft_rounds || []).filter(r=>r.method==='ai'))
 function status(round) {
  switch (round.status) {
  case 'replenishing': return '消息不足，正在自动补筛，已选内容保留…'
@@ -14,6 +14,7 @@ function status(round) {
  case 'insufficient': return round.error
  case 'empty': return round.choices.length ? 'AI 判断本轮没有值得制作的帖子' : '本轮没有可供 AI 选择的新帖子'
  case 'failed': return (round.retry_from==='judging'?'AI 选稿失败：':'入队未完成：') + round.error
+ case 'cancelled': return '选稿已停止。保留当时的取舍，交付情况以稿件记录为准。'
  default: return ''
  }
 }

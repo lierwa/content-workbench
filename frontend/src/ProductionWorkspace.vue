@@ -16,6 +16,7 @@ const readingPanel = ref('')
 const route = useRoute()
 const router = useRouter()
 const data = ref({ jobs: [], accounts: [] })
+const currentJob = computed(() => data.value.jobs.find(j => j.id === route.params.id))
 const error = ref('')
 const notice = ref('')
 const pending = ref(false)
@@ -35,17 +36,19 @@ const accountForm = ref({ platform: 'wechat', display_name: '', mode: 'browser' 
 const titleOpen = ref(false)
 const title = ref('')
 const titleRevision = ref(null)
+const coverEdit = ref(null)
+const coverFields = {brand:'账号名',topics:'栏目字样',headline:'主文字',footer:'底部文字'}
 const bodyOpen = ref(false)
 const body = ref('')
 const reviewOpen = ref(false), editorPanel = ref(''), savedAt = ref('')
 const previewHtml=ref(''),previewError=ref(''),previewLoading=ref(false)
 let previewTimer,previewRequest=0
-watch(()=>[editorPanel.value,body.value],()=>{
+watch(()=>[editorPanel.value,body.value,currentJob.value?.id,currentJob.value?.draft?.cover_url],()=>{
  clearTimeout(previewTimer);const token=++previewRequest
  if(editorPanel.value!=='preview')return
  previewLoading.value=true
  previewTimer=setTimeout(async()=>{
-  try{const j=currentJob.value;const r=await api('/api/production/preview',{platform:j.target.platform,theme:j.draft.theme||'simple',body_html:body.value,presentation_mode:j.draft.presentation_mode});if(token===previewRequest){previewHtml.value=r.html;previewError.value=''}}
+  try{const j=currentJob.value;const r=await api('/api/production/preview',{platform:j.target.platform,theme:j.draft.theme||'simple',body_html:body.value,presentation_mode:j.draft.presentation_mode,cover_url:j.draft.cover_url});if(token===previewRequest){previewHtml.value=r.html;previewError.value=''}}
   catch(e){if(token===previewRequest)previewError.value=e.message}
   finally{if(token===previewRequest)previewLoading.value=false}
  },250)
@@ -65,7 +68,6 @@ const entriesRevision = ref(null)
 const originals = ref([])
 const originalIndex = ref(0)
 const sourceError = ref('')
-const currentJob = computed(() => data.value.jobs.find(j => j.id === route.params.id))
 const currentWork = computed(()=>(data.value.works||[]).find(w=>w.job_ids.includes(currentJob.value?.id)))
 const workJobs = work => data.value.jobs.filter(j=>work?.job_ids.includes(j.id))
 const savedJob = j => j.target.platform==='local' ? j.stage==='ready_review'&&j.editorial_approved : ['saved','draft_verified'].includes(j.platform_save?.status)
@@ -293,6 +295,18 @@ async function uploadCover(event) {
     await refresh()
   } catch (e) { notice.value = e.message } finally { pending.value = false }
 }
+function editCoverText(job) {
+  coverEdit.value = {id:job.id, revision:job.revision, text:{...job.draft.cover_source.text}}
+}
+async function saveCoverText() {
+  const edit = coverEdit.value
+  pending.value = true
+  try {
+    await request(`/api/production/jobs/${edit.id}`, {expected_revision:edit.revision,changes:{cover_text:edit.text}}, 'PATCH')
+    coverEdit.value = null
+    await refresh()
+  } catch (e) { notice.value=e.message } finally { pending.value=false }
+}
 async function removeCover() {
   const job = currentJob.value
   pending.value = true
@@ -355,7 +369,7 @@ async function connect(account) {
             <button class="icon-button" title="二创过程" aria-label="二创过程" :aria-pressed="readingPanel==='process'" @click="toggleReadingPanel('process')"><Icon name="process"/></button>
            </div>
            <div class="article-meta">{{currentWork?.line_name||currentJob.packet?.line?.name}}<span class="dot">·</span>{{platform(currentJob.target.platform)}}</div><h1>{{currentJob.draft?.title||currentJob.source_title}}</h1><ArticleBody :html="currentJob.draft?.body_html||currentJob.draft?.html||''"/></article>
-          <aside v-if="!readingPanel" class="delivery-rail"><section class="surface delivery-panel"><h2>稿件版本</h2><div v-for="job in workJobs(currentWork)" :key="job.id" class="delivery-card" :class="{active:job.id===currentJob.id}"><RouterLink :to="`/drafts/${job.id}`" class="delivery-title"><span class="platform-mark small" :class="job.target.platform">{{job.target.platform==='local'?'文':job.target.platform==='wechat'?'微':'头'}}</span><strong>{{platform(job.target.platform)}}</strong><Icon v-if="job.id===currentJob.id" name="check" :size="16"/></RouterLink><p class="muted">{{accountName(job)}}</p><span class="status-pill" :class="job.stage==='remote_verified'?'success':job.error?'warning':'neutral'">{{status(job)}}</span><template v-if="job.id===currentJob.id"><p v-if="problem(job)" class="action-error" role="alert">{{problem(job)}}</p><details v-if="job.error && problem(job)!==job.error" class="error-details"><summary>错误详情</summary><p>{{job.error}}</p></details><div class="delivery-actions"><a v-if="draftLink(job)" :href="draftLink(job)" target="_blank" rel="noopener noreferrer">平台草稿 ↗</a><a v-else-if="job.remote?.draft_id" :href="job.target.platform==='wechat'?'https://mp.weixin.qq.com/':'https://mp.toutiao.com/'" target="_blank" rel="noopener noreferrer">平台后台 ↗</a><el-button v-if="primary(job)" size="small" :disabled="pending" @click="runAction(primary(job).action,[job])">{{primary(job).label}}</el-button></div><el-tooltip v-if="job.target.platform!=='local'" :content="publishReason(job)" :disabled="canPublish(job)"><span class="publish-action"><el-button :disabled="!canPublish(job)||pending" @click="openConfirmation([job])">发布</el-button></span></el-tooltip></template></div></section><section class="surface cover-panel"><h2>封面</h2><img v-if="coverUrl(currentJob.draft?.cover_url)" :src="coverUrl(currentJob.draft.cover_url)" alt="封面"/><span v-else class="muted">未设置</span><label v-if="canEdit(currentJob)" class="upload-button" :class="{disabled:pending}">更换封面<input type="file" accept="image/png,image/jpeg" :disabled="pending" @change="uploadCover"/></label><el-button v-if="canEdit(currentJob) && currentJob.draft?.cover_url" text :disabled="pending" @click="removeCover">移除封面</el-button></section></aside>
+          <aside v-if="!readingPanel" class="delivery-rail"><section class="surface delivery-panel"><h2>稿件版本</h2><div v-for="job in workJobs(currentWork)" :key="job.id" class="delivery-card" :class="{active:job.id===currentJob.id}"><RouterLink :to="`/drafts/${job.id}`" class="delivery-title"><span class="platform-mark small" :class="job.target.platform">{{job.target.platform==='local'?'文':job.target.platform==='wechat'?'微':'头'}}</span><strong>{{platform(job.target.platform)}}</strong><Icon v-if="job.id===currentJob.id" name="check" :size="16"/></RouterLink><p class="muted">{{accountName(job)}}</p><span class="status-pill" :class="job.stage==='remote_verified'?'success':job.error?'warning':'neutral'">{{status(job)}}</span><template v-if="job.id===currentJob.id"><p v-if="problem(job)" class="action-error" role="alert">{{problem(job)}}</p><details v-if="job.error && problem(job)!==job.error" class="error-details"><summary>错误详情</summary><p>{{job.error}}</p></details><div class="delivery-actions"><a v-if="draftLink(job)" :href="draftLink(job)" target="_blank" rel="noopener noreferrer">平台草稿 ↗</a><a v-else-if="job.remote?.draft_id" :href="job.target.platform==='wechat'?'https://mp.weixin.qq.com/':'https://mp.toutiao.com/'" target="_blank" rel="noopener noreferrer">平台后台 ↗</a><el-button v-if="primary(job)" size="small" :disabled="pending" @click="runAction(primary(job).action,[job])">{{primary(job).label}}</el-button></div><el-tooltip v-if="job.target.platform!=='local'" :content="publishReason(job)" :disabled="canPublish(job)"><span class="publish-action"><el-button :disabled="!canPublish(job)||pending" @click="openConfirmation([job])">发布</el-button></span></el-tooltip></template></div></section><section class="surface cover-panel"><h2>封面</h2><img v-if="coverUrl(currentJob.draft?.cover_url)" :src="coverUrl(currentJob.draft.cover_url)" alt="封面"/><span v-else class="muted">未设置</span><el-button v-if="canEdit(currentJob) && currentJob.draft?.cover_source?.text" :disabled="pending" text @click="editCoverText(currentJob)">编辑封面文字</el-button><label v-if="canEdit(currentJob)" class="upload-button" :class="{disabled:pending}">更换封面<input type="file" accept="image/png,image/jpeg" :disabled="pending" @change="uploadCover"/></label><el-button v-if="canEdit(currentJob) && currentJob.draft?.cover_url" text :disabled="pending" @click="removeCover">移除封面</el-button></section></aside>
           </div>
           <aside v-show="readingPanel==='materials'" class="original-read surface"><div class="section-heading"><h2>材料</h2><div class="actions"><a v-if="original&&safeLink(original.url)" :href="safeLink(original.url)" target="_blank" rel="noopener noreferrer">原文 ↗</a><button class="icon-button" title="关闭材料" aria-label="关闭材料" @click="readingPanel=''">×</button></div></div><el-select v-if="originals.length>1" v-model="originalIndex" aria-label="选择报道"><el-option v-for="(source,index) in originals" :key="index" :value="index" :label="source.title"/></el-select><p v-if="sourceError" class="action-error">{{sourceError}}</p><h3 v-if="original">{{original.title}}</h3><p v-for="(paragraph,index) in originalParagraphs" :key="index">{{paragraph}}</p><div class="material-links"><a v-for="source in [...articleSources,...hotlistSources]" :key="source.url" :href="safeLink(source.url)" target="_blank" rel="noopener noreferrer">{{source.label||source.title}} ↗</a></div></aside>
           <SessionTimeline v-show="readingPanel==='process'" embedded :model-value="readingPanel==='process'" :job-id="currentJob.id" @update:model-value="open=>{if(!open)readingPanel=''}"/>
@@ -371,7 +385,11 @@ async function connect(account) {
     </template>
   </section>
   <ReviewReport v-if="currentJob" v-model="reviewOpen" :job="currentJob" :editable="canEdit(currentJob)" @updated="refresh" @edit="openBody"/>
-  <el-dialog v-model="entriesOpen" title="调整集合条目" width="620px" :close-on-click-modal="false"><ol class="entry-list"><li v-for="(entry,index) in entries" :key="entry.id"><span>{{entry.title}}</span><div class="actions"><el-button text :disabled="index===0||pending" @click="moveEntry(entries,index,-1)">上移</el-button><el-button text :disabled="index===entries.length-1||pending" @click="moveEntry(entries,index,1)">下移</el-button><el-button text :disabled="pending" @click="entries.splice(index,1)">移出</el-button></div></li></ol><p v-if="notice" class="action-error">{{notice}}</p><template #footer><el-button :disabled="pending" @click="entriesOpen=false">取消修改</el-button><el-button type="primary" :loading="pending" @click="saveEntries">{{entries.length?'保存并重新组稿':'取消这份稿件'}}</el-button></template></el-dialog>
+  <el-dialog :model-value="!!coverEdit" title="编辑封面文字" width="min(460px, 95vw)" @close="coverEdit=null">
+      <el-form v-if="coverEdit" label-position="top"><el-form-item v-for="(label,key) in coverFields" :key="key" :label="label"><el-input v-model="coverEdit.text[key]" maxlength="100"/></el-form-item></el-form>
+      <template #footer><el-button @click="coverEdit=null">取消</el-button><el-button type="primary" :loading="pending" @click="saveCoverText">保存封面</el-button></template>
+    </el-dialog>
+    <el-dialog v-model="entriesOpen" title="调整集合条目" width="620px" :close-on-click-modal="false"><ol class="entry-list"><li v-for="(entry,index) in entries" :key="entry.id"><span>{{entry.title}}</span><div class="actions"><el-button text :disabled="index===0||pending" @click="moveEntry(entries,index,-1)">上移</el-button><el-button text :disabled="index===entries.length-1||pending" @click="moveEntry(entries,index,1)">下移</el-button><el-button text :disabled="pending" @click="entries.splice(index,1)">移出</el-button></div></li></ol><p v-if="notice" class="action-error">{{notice}}</p><template #footer><el-button :disabled="pending" @click="entriesOpen=false">取消修改</el-button><el-button type="primary" :loading="pending" @click="saveEntries">{{entries.length?'保存并重新组稿':'取消这份稿件'}}</el-button></template></el-dialog>
   <el-dialog v-model="confirmOpen" title="确认发布" width="560px"><div v-for="job in confirmationJobs" :key="job.id" class="publish-row"><strong>{{job.draft.title}}</strong><p>{{platform(job.target.platform)}} · {{accountName(job)}}</p><a v-if="draftLink(job)" :href="draftLink(job)" target="_blank" rel="noopener noreferrer">平台草稿 ↗</a></div><template #footer><el-button @click="confirmOpen=false">取消</el-button><el-button type="primary" :loading="pending" @click="runAction('confirm_publish',confirmationJobs)">发布 {{confirmationJobs.length}} 篇</el-button></template></el-dialog>
   <el-dialog v-model="accountOpen" title="添加账号" width="440px"><el-form label-position="top" @submit.prevent="addAccount"><el-form-item label="平台"><el-select v-model="accountForm.platform" aria-label="平台"><el-option label="公众号" value="wechat"/><el-option label="今日头条" value="toutiao"/></el-select></el-form-item><el-form-item label="账号名称"><el-input v-model="accountForm.display_name" aria-label="账号名称"/></el-form-item></el-form><p v-if="notice" class="action-error">{{notice}}</p><template #footer><el-button @click="accountOpen=false">取消</el-button><el-button type="primary" :loading="pending" :disabled="!accountForm.display_name.trim()" @click="addAccount">添加</el-button></template></el-dialog>
 </template>

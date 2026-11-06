@@ -318,9 +318,14 @@ def execute(root, database, line, cancel, records):
             review.run(root, items, rows, rules, cancel)
             current=review.Store(store.root,0)
             if current.value['status']!='completed':break
-            kept=sum(bool((e.get('comparison') or {}).get('selected')) for e in current.value['events'])
-            if kept>=goal:break
-            cancel.replenishment_attempted.update(e['id'] for e in current.value['events'] if e.get('verification_attempted'))
+            kept=sum(review.counts_for_draft_target(e, cancel) and bool((e.get('comparison') or {}).get('selected'))
+                     for e in current.value['events'])
+            if kept>=goal:
+                if current.value.pop('shortage', None) is not None:
+                    current.save()
+                break
+            cancel.replenishment_attempted.update(e['id'] for e in current.value['events']
+                if (e.get('plan') or {}).get('selected') and e.get('verification_attempted'))
             if not review.refill_selection(current,byref,cancel,goal-kept):
                 current.value['shortage']={'target':goal,'available':kept,'reason':'未取材候选耗尽或没有更多适合本栏目的消息'}
                 current.phase('completed')
@@ -334,5 +339,10 @@ def execute(root, database, line, cancel, records):
         current.save()
         if policy.line_hash(line) == policy.line_hash(cancel.current_line()):
             for event in all_events:
+                if (any(row.get('invalid_model_output') for row in event.get('initial', []))
+                        or any(r.get('invalid_model_output') for r in event['screening']['rounds'] if r['stage']=='selection')):
+                    # The batch retains the pending row. A future screen must
+                    # judge it again instead of reusing an editorial decision.
+                    continue
                 event['writeback_current'] = database.remember(line, [byref[r] for r in event['refs']], event, root.name, screen.timestamp())
         screen.write_json(store.root / 'all-events.json', all_events)

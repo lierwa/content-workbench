@@ -25,7 +25,9 @@ def call_stage(name):
         return 'initial'
     if name.startswith(('selection', 'digest-selection')):
         return 'selection'
-    return 'verification'
+    if name in ('assessment','digest-verification'):
+        return 'verification'
+    return None
 
 
 def round_for(event, stage):
@@ -74,7 +76,7 @@ def view(batch_dir):
     calls = []
     for path in (root / 'review' / 'calls').glob('*/status.json'):
         call = read(path, {})
-        if call.get('started_at'):
+        if call.get('started_at') and call_stage(call.get('stage','')):
             calls.append(dict(call, phase=call_stage(call.get('stage', ''))))
     calls.sort(key=lambda c: seconds(c['started_at']))
     running = batch.get('status') == 'screening'
@@ -93,6 +95,7 @@ def view(batch_dir):
         first = initial.get(event_id) or initial_by_members.get(frozenset(refs))
         first_round = next((r for r in (first or {}).get('screening', {}).get('rounds', []) if r.get('stage') == 'initial'), first)
         phases['initial'].append(dict(base, decision=(first or {}).get('decision'),
+            invalid=bool((first or {}).get('invalid_model_output') or (first_round or {}).get('invalid_model_output')),
             reason=(first or {}).get('reason'), evidence=evidence(first_round or {}, byref),
             inputs=[{k: i.get(k) for k in ('title', 'summary', 'source_name', 'url', 'entry_url')} for i in members]))
         if not first or first.get('decision') != 'advance':
@@ -100,12 +103,15 @@ def view(batch_dir):
         selection = round_for(event, 'selection')
         # A failed/retried global comparison must not expose inherited decisions
         # as the result of this attempt, or advance the third step prematurely.
-        if selection and not review.get('selection_chunked') and selection_after and seconds(selection.get('updated_at')) < selection_after:
+        if (selection and review.get('phase')=='planning' and not review.get('selection_chunked')
+                and latest_selection and latest_selection['stage']=='selection'
+                and selection_after >= seconds(last_run.get('started_at'))
+                and seconds(selection.get('updated_at')) < selection_after):
             selection = None
         check = event.get('selection_check') if review.get('selection_chunked') else None
         shown = selection or check or {}
         phases['selection'].append(dict(base, decision=(selection or {}).get('decision'), checked=bool(check),
-            reason=shown.get('reason'), angle=shown.get('angle'),
+            invalid=bool(shown.get('invalid_model_output')), reason=shown.get('reason'), angle=shown.get('angle'),
             priority=(selection or {}).get('priority'), unknowns=(selection or {}).get('unknowns', []),
             evidence=evidence(shown, byref)))
         if not selection or selection.get('decision') != 'advance':
@@ -130,8 +136,9 @@ def view(batch_dir):
         error = event.get('error') if not assessment and not inflight else None
         working = running and inflight
         row_status = ('done' if assessment else event['stage'] if working else
-                      'stopped' if batch.get('status') == 'stopped' else 'failed' if error else 'waiting')
+                      'failed' if error else 'stopped' if batch.get('status') == 'stopped' else 'waiting')
         phases['verification'].append(dict(base, decision=third.get('decision'), reason=third.get('reason'),
+            invalid=bool(third.get('invalid_model_output') or event.get('invalid_model_output') or event.get('model_unavailable')),
             angle=third.get('angle'), unknowns=third.get('unknowns', []), evidence=evidence(third, lookup),
             reading=reading, status=row_status, error=error,
             material_count=sum(m.get('status') == 'read' for m in materials)))

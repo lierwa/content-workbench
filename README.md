@@ -135,7 +135,7 @@ npm.cmd --prefix frontend run build
 .\.venv-win\Scripts\python.exe -m single_pass --port 18765 --data-dir data/single-pass-v2
 ```
 
-已有 data/single-pass-v2 和前端构建时，可使用 start-workbench.cmd。该脚本检查项目归属并隐藏启动服务；缺少数据目录时会报错。入口为 http://127.0.0.1:18765/。
+已有 data/single-pass-v2 时，可使用 start-workbench.cmd。它校验前端源码与本地构建产物的指纹。首次启动、拉取前端更新或构建文件缺失时，它使用已安装的 npm 依赖重新构建，成功后切换页面入口。入口为 http://127.0.0.1:18765/。
 
 macOS / Linux：
 

@@ -92,5 +92,101 @@
     "category": "财经",
     "url": "https://www.chinanews.com.cn/rss/finance.xml",
     "reader": "rss"
+  },
+  "game_3dm_news": {
+    "name": "3DM游戏新闻",
+    "category": "游戏",
+    "url": "https://www.3dmgame.com/news_32_1/",
+    "reader": "game"
+  },
+  "game_ps_blog": {
+    "name": "PlayStation中文博客",
+    "category": "游戏",
+    "url": "https://blog.zh-hant.playstation.com/feed/",
+    "reader": "game"
+  },
+  "game_steam_new": {
+    "name": "Steam国区热门新品",
+    "category": "游戏",
+    "url": "https://store.steampowered.com/search/?filter=popularnew&sort_by=Released_DESC&category1=998&cc=CN&l=schinese",
+    "reader": "game"
+  },
+  "game_hykb_calendar": {
+    "name": "好游快爆开测日历",
+    "category": "游戏",
+    "url": "https://m.3839.com/timeline.html",
+    "reader": "game"
+  },
+  "game_indienova_logs": {
+    "name": "indienova会员日志",
+    "category": "游戏",
+    "url": "https://indienova.com/blogs/all",
+    "reader": "game"
+  },
+  "game_github_tools": {
+    "name": "GitHub游戏开发工具",
+    "category": "游戏",
+    "url": "https://api.github.com/search/repositories",
+    "reader": "game",
+    "article_hosts": [
+      "github.com"
+    ]
+  },
+  "game_nintendo_hk": {
+    "name": "任天堂香港",
+    "category": "游戏",
+    "url": "https://www.nintendo.com/hk/topics",
+    "reader": "game"
+  },
+  "game_xbox_wire": {
+    "name": "Xbox Wire",
+    "category": "游戏",
+    "url": "https://news.xbox.com/en-us/",
+    "reader": "game"
+  },
+  "game_gcores": {
+    "name": "机核",
+    "category": "游戏",
+    "url": "https://www.gcores.com/rss",
+    "reader": "game"
+  },
+  "game_ark_official": {
+    "name": "明日方舟官方公告",
+    "category": "游戏",
+    "url": "https://www.taptap.cn/app/70253/topic?type=official",
+    "reader": "game"
+  },
+  "game_indienova_news": {
+    "name": "indienova编辑选品",
+    "category": "游戏",
+    "url": "https://indienova.com/feed/",
+    "reader": "game",
+    "article_hosts": [
+      "store.steampowered.com"
+    ]
+  },
+  "game_github_trending": {
+    "name": "GitHub 游戏相关周趋势",
+    "category": "游戏",
+    "url": "https://github.com/trending?since=weekly",
+    "reader": "game"
+  },
+  "game_itch_tools": {
+    "name": "itch.io 游戏工具采用榜",
+    "category": "游戏",
+    "url": "https://itch.io/game-development/tools/most-projects/open-source",
+    "reader": "game"
+  },
+  "game_factorio_logs": {
+    "name": "Factorio 开发团队 Friday Facts",
+    "category": "游戏",
+    "url": "https://factorio.com/blog/",
+    "reader": "game"
+  },
+  "game_godot_tools": {
+    "name": "Godot工具目录",
+    "category": "游戏",
+    "url": "https://godotengine.org/asset-library/asset?category=5&sort=updated",
+    "reader": "game"
   }
 }

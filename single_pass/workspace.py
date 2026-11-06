@@ -20,13 +20,14 @@ def read(path, default=None):
 
 
 class Workspace:
-    def __init__(self, data, app_class):
+    def __init__(self, data, app_class, *, original_reader=None):
         self.data = Path(data).resolve()
         self.column_config = ColumnConfig(self.data)
         self.collection_settings = CollectionSettings(self.data)
         self.database = pool.Pool(self.data / 'pool.sqlite3')
         self.app_class = app_class
         self.platform = None
+        self.original_reader = original_reader
         self.production = None
         self.lock = threading.RLock()
         self.workers = {}
@@ -96,7 +97,7 @@ class Workspace:
             sources = self.collection_settings.sources(settings, self.config())
             if body.get('retry_run_id'):
                 if body['retry_run_id'] != self.collection.get('id'): raise ValueError('采集记录已变化')
-                sources = [s['source_id'] for s in self.collection['sources'] if s['status'] == 'failed']
+                sources = [s['source_id'] for s in self.collection['sources'] if s['status'] in ('failed','partial')]
             return self.start_collect(source_ids=sources, per_source_limit=settings['per_source_limit'])
 
     def topic_records(self, query):
@@ -498,6 +499,8 @@ class Workspace:
             if policy.line_hash(line) != policy.line_hash(current_line):
                 raise ValueError('栏目配置已改变，请重新筛选')
             value = self._view(run_id)
+            if batch.get('input_cutoff_at'):
+                value['batch']['input_cutoff_at']=batch['input_cutoff_at']
             value['line'] = dict(current_line, **({'_scope_hours': line['_scope_hours']} if '_scope_hours' in line else {}))
             value['edition_id'] = batch['edition_id']
             for event in value['review']['events']:
@@ -631,26 +634,36 @@ class Workspace:
                 result = {'source_id': source, 'name': collect.SOURCES[source], 'count': 0, 'error': None}
                 try:
                     key = collect.snapshot_key(source)
-                    if key not in responses:
-                        raw = collect.fetch(collect.URLS[source])
-                        (root / (key + '.txt')).write_text(raw, encoding='utf-8')
-                        responses[key] = (raw, collect.now())
-                    raw, observed = responses[key]
-                    rows = collect.PARSERS[source](raw)
+                    if collect.CATALOG[source].get('reader') == 'game':
+                        from . import game_sources
+                        observed = collect.now()
+                        rows, gaps = game_sources.snapshot(source,root,observed)
+                        snapshot_file = root / source / 'pages.json'
+                        if gaps:
+                            result['page_errors'] = gaps
+                    else:
+                        snapshot_file = root / (key + '.txt')
+                        if key not in responses:
+                            raw = collect.fetch(collect.URLS[source])
+                            snapshot_file.write_text(raw, encoding='utf-8')
+                            responses[key] = (raw, collect.now())
+                        raw, observed = responses[key]
+                        rows = collect.PARSERS[source](raw)
                     available = len(rows)
                     rows = [r for r in rows if isinstance(r.get('title'), str) and r['title'].strip()
                             and collect.canonical(r.get('entry_url'))]
                     if len(rows) != available:
                         result['invalid_entries'] = available - len(rows)
-                    if not rows:
+                    valid_empty = source in ('game_github_tools','game_ps_blog','game_gcores','game_indienova_news') and not result.get('page_errors')
+                    if not rows and not valid_empty:
                         raise ValueError('响应为空或未解析到条目')
                     selected = rows[:amount][:per_source_limit]
                     for row in selected:
-                        row['snapshot_ref'] = str((root / (key + '.txt')).relative_to(self.data))
+                        row['snapshot_ref'] = str(snapshot_file.relative_to(self.data))
                     changes = self.database.ingest(selected, observed, run_id=root.name)
                     if self.production and changes['changed_refs']:
                         self.production.invalidate_sources(changes['changed_refs'])
-                    result.update(status='success', count=len(selected), available_count=len(rows),
+                    result.update(status='partial' if result.get('page_errors') else 'success', count=len(selected), available_count=len(rows),
                                   collected_at=observed, changes=changes)
                 except Exception as exc:
                     result.update(status='failed', error=str(exc))
@@ -659,7 +672,8 @@ class Workspace:
                     screen.write_json(root / 'result.json', self.collection)
                     screen.write_json(self.data / 'collection.json', self.collection)
             self.collection['status'] = ('interrupted' if self.closed.is_set() else
-                'partial' if any(s['status'] == 'failed' for s in self.collection['sources']) and any(s['status'] == 'success' for s in self.collection['sources']) else
+                'partial' if any(s['status'] == 'partial' for s in self.collection['sources']) or
+                any(s['status'] == 'failed' for s in self.collection['sources']) and any(s['status'] == 'success' for s in self.collection['sources']) else
                 'completed' if any(s['status'] == 'success' for s in self.collection['sources']) else 'failed')
         finally:
             self.collection['finished_at'] = collect.now()
@@ -720,6 +734,8 @@ class Workspace:
                          'started_at': collect.now(), 'sources': self.collection['sources'], 'error': None,
                          'scope': plan['scope'], 'topic_record_id': topic_record_id or uuid.uuid4().hex,
                          'trigger': 'automatic' if scheduled else 'manual'}
+                if line.get('game_profile') and plan.get('evidence_cutoff_at'):
+                    batch['input_cutoff_at']=plan['evidence_cutoff_at']
                 screen.write_json(root / 'items.json', items)
                 screen.write_json(root / 'input-records.json', records)
                 if previous and previous.get('status') in ('partial', 'stopped', 'failed'):
@@ -743,10 +759,16 @@ class Workspace:
             budget = policy.config().get('budget_seconds')
             cancel.deadline = time.monotonic() + budget if budget else None
             cancel.current_line = lambda: self.line(line['id'])
-            cancel.original_reader = execution_trace.source_tool(root / 'review', '读取原文', self.platform.read_original) if self.platform else None
-            cancel.prepare_original_reader = self.platform.start_persistent_session if self.platform else None
-            cancel.reference_reader = execution_trace.source_tool(root / 'review', '读取参考材料', self.platform.read_reference) if self.platform else None
+            public_game = bool(line.get('game_profile'))
+            original_reader = self.original_reader
+            if not original_reader and self.platform and not public_game:
+                original_reader = self.platform.read_original
+            cancel.original_reader = execution_trace.source_tool(root / 'review', '读取原文', original_reader) if original_reader else None
+            cancel.prepare_original_reader = self.platform.start_persistent_session if self.platform and not public_game else None
+            cancel.reference_reader = execution_trace.source_tool(root / 'review', '读取参考材料', self.platform.read_reference) if self.platform and not public_game else None
             cancel.original_cache = {}
+            if getattr(self.original_reader,'background_library',None):
+                cancel.background_library = self.original_reader.background_library
             worker = self.screen_executor.submit(self._screen, root, line, records, cancel)
             self.workers[line['id']] = (worker, cancel)
             return {'run_id': root.name, 'batch_id': root.name, 'status': 'queued', 'record_id': topic_records.record_id(batch)}

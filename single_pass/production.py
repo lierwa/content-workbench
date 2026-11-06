@@ -125,6 +125,10 @@ class ProductionService:
             jobs = copy.deepcopy(list(self.jobs.values()))
         # Full material bodies are persisted for provenance, not sent on every poll.
         for job in jobs:
+            packet=job.get('packet') or {}
+            if job['target']['platform']=='local' and (packet.get('line') or {}).get('game_profile')=='game_pick':
+                job['official_trailer']=next((m['game_detail']['trailer'] for m in packet.get('materials',[])
+                    if m.get('role')=='original' and (m.get('game_detail') or {}).get('trailer')),None)
             if job.get('draft', {}).get('title') and job.get('draft', {}).get('html'):
                 job['content_hash'] = composition.content_hash(job)
             else: job['content_hash'] = None
@@ -287,6 +291,9 @@ class ProductionService:
         line = copy.deepcopy(line_snapshot or source.get('line') or {})
         if line_snapshot and policy.line_hash(line) != policy.line_hash(source.get('line') or {}):
             raise ValueError('选稿快照与筛选依据不一致')
+        batch_line=source.get('line') or {}
+        if line.get('game_profile') and '_scope_hours' in batch_line:
+            line['_scope_hours']=batch_line['_scope_hours']
         column_policy.defaults(line)
         if line.get('format') == 'digest':
             shortage = column_policy.count_error(line, len(set(event_ids)))
@@ -335,6 +342,9 @@ class ProductionService:
                     ref_items = [copy.deepcopy(items[r]) for r in event['refs']]
                     if not ref_items: raise ValueError('找不到选题原标题')
                     sources = copy.deepcopy(event.get('materials') or [])
+                    if event.get('pick_background'):
+                        from .review import material_content
+                        sources.append(material_content(self.root.parent/batch_id/'review',event['pick_background']))
                     if not any(m.get('status') == 'read' and m.get('content') for m in sources):
                         raise ValueError('选题缺少已读正文')
                     adoption_key = policy.digest({'line': line.get('id'), 'format': line.get('format', 'single'),
@@ -933,7 +943,7 @@ class ProductionService:
                     formatted = None
                 else:
                     candidate['body_html'] = composition.platform_body(
-                        composition.strip_repeated_title(candidate['markdown'], candidate['title']))
+                        composition.strip_repeated_title(candidate['markdown'], candidate['title']),job=view)
                 cached = view.get('editorial_review') or {}
                 if editorial.reusable(cached, view, candidate):
                     verdict = cached
@@ -969,7 +979,7 @@ class ProductionService:
                         break
                 repair = dict(view, revision_candidate=candidate, review_issues=verdict['issues'])
                 revised = composition.edit(call_root, repair, cancel, proof_required=False)
-                revised_body = composition.platform_body(composition.strip_repeated_title(revised['markdown'], revised['title']))
+                revised_body = composition.platform_body(composition.strip_repeated_title(revised['markdown'], revised['title']),job=view)
                 unchanged = (candidate.get('summary') == revised.get('summary') and
                              editorial.text_fingerprint(candidate['title'], candidate['body_html'])
                              == editorial.text_fingerprint(revised['title'], revised_body))
@@ -999,7 +1009,7 @@ class ProductionService:
             previous = copy.deepcopy(job.get('draft') or {})
             review_passed = (job.get('editorial_review') or {}).get('passed') is True and (job.get('editorial_review') or {}).get('decision') == 'pass'
             markdown = composition.strip_repeated_title(edited['markdown'],edited['title'])
-            plain_body = composition.platform_body(markdown)
+            plain_body = composition.platform_body(markdown,job=job)
             reviewed_draft = {'title':edited['title'], 'summary':edited['summary'], 'body_html':plain_body}
             bundle = {'cover_url': None, 'cover_sha256': None, 'cover_kind': None,
                       'cover_source': None, 'body_image_hashes': {}, 'image_plan': None}
@@ -1336,8 +1346,10 @@ class ProductionService:
 
 
 
-    def action(self, job_ids, action, expected_revisions, expected_approvals=None):
+    def action(self, job_ids, action, expected_revisions, expected_approvals=None, *, use_current_rules=False):
         if not isinstance(job_ids, list) or not isinstance(expected_revisions, dict): raise ValueError('需要任务和版本列表')
+        if type(use_current_rules) is not bool or use_current_rules and action!='redo_writing':
+            raise ValueError('仅重新写作可指定当前栏目要求')
         if action not in ('sync','resume','confirm_publish','verify','review','retry','cancel','redo_writing','redo_editing','redo_formatting','refresh_images'): raise ValueError('不支持该操作')
         batch_id = uuid.uuid4().hex if action == 'sync' else None
         rewrite_batch = uuid.uuid4().hex if action == 'redo_writing' else None
@@ -1428,9 +1440,25 @@ class ProductionService:
                             job['stage'] = job['failed_stage']; job['status'] = 'queued'; job['error'] = None; self._record(job, 'retry')
                         elif action.startswith('redo_'):
                             editable = job['stage'] in ('ready_review','remote_verified','needs_attention') or (job['stage'] == 'failed' and job.get('external_operation') == 'publish' and (job.get('remote') or {}).get('status') == 'failed')
+                            if (action == 'redo_writing' and use_current_rules and job['status'] == 'failed'
+                                    and job.get('failed_stage') in LOCAL_STAGES and not job.get('remote')
+                                    and job['target']['platform'] == 'local'):
+                                editable = True
                             if not editable or job.get('operation_uncertain') or job['status'] == 'outcome_unknown' or (job.get('remote') or {}).get('status') in ('submitted','reviewing','published','unknown','outcome_unknown'):
                                 raise ValueError('当前状态不能重做稿件')
                             part = action[5:]
+                            next_line=None
+                            if use_current_rules:
+                                from .columns import ColumnConfig
+                                frozen=job['packet']['line']
+                                if job.get('remote') or job['target']['platform']!='local' or frozen.get('game_profile') not in ('game_pick','game_devlog'):
+                                    raise ValueError('当前选项只适用于游戏栏目本地单篇')
+                                live=next((l for l in ColumnConfig(self.root.parent).read()['lines'] if l['id']==frozen['id']),None)
+                                if not live or live.get('game_profile')!=frozen['game_profile']:raise ValueError('原栏目不存在或类型已变化')
+                                next_line=dict(frozen,**{k:copy.deepcopy(live[k]) for k in ('writing_rules','format_policy','production_rules')})
+                                saved=self.jobs_dir/job_id/'revisions'
+                                saved.mkdir(exist_ok=True)
+                                screen.write_json(saved/f"{job['revision']}.json",job)
                             if part == 'editing' and not job.get('writing'): raise ValueError('没有初稿')
                             if part == 'formatting' and not ((job.get('draft') or {}).get('body_html') or (job.get('draft') or {}).get('html')): raise ValueError('没有可排版的正文')
                             if part in ('writing','editing'):
@@ -1450,6 +1478,11 @@ class ProductionService:
                             job['revision'] += 1; job['approval'] = None
                             if job['remote']: job['remote']['verified_hash'] = None
                             job['local_operation'] = 'reformat' if part == 'formatting' else 'compose'
+                            if next_line:
+                                job['packet']['line']=next_line
+                                job['packet']['account_guidance']=next_line['writing_rules']
+                                job['draft']={**job['draft'],'markdown':'','body_html':'','html':''}
+                                part='researching'
                             job.update(stage=part,status='queued',error=None); self._record(job, action)
                         operation = {'resume':'resume_draft','retry':job['local_operation'] if job.get('local_operation') in ('reformat','review','images') else 'compose','confirm_publish':'publish','redo_writing':'compose','redo_editing':'compose','redo_formatting':'reformat','refresh_images':'images'}.get(action, action)
                         self._enqueue(job_id, operation)

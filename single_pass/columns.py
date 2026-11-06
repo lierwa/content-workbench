@@ -24,6 +24,16 @@ class ColumnConfig:
         import json
         value = json.loads((self.path if self.path.exists() else self.defaults).read_text(encoding='utf-8'))
         value.setdefault('revision', 0)
+        # Seed once per config. An explicit deletion later must stay deleted.
+        if not value.get('game_columns_installed'):
+            game_lines = json.loads(Path(__file__).with_name('game_columns.json').read_text(encoding='utf-8'))
+            existing = {line['id'] for line in value['lines']}
+            for line in game_lines:
+                if line['id'] not in existing:
+                    value['lines'].append(line)
+                for source in line['sources']:
+                    value['sources'].setdefault(source, {'enabled':True, 'interval_minutes':None})
+            value['game_columns_installed'] = True
         if not isinstance(value.get('sources'), dict) or not value['sources']:
             raise ValueError('来源配置为空')
         for source_id in collect.SOURCES:
@@ -58,6 +68,9 @@ class ColumnConfig:
 
     @classmethod
     def validate(cls, line, config):
+        if line.get('game_profile') and (line['game_profile'] not in {'game_digest','game_pick','game_devlog'}
+                or not isinstance(line.get('group_rules'),str) or not line['group_rules'].strip()):
+            raise ValueError('游戏栏目类型或归组规则无效')
         if (not isinstance(line.get('name'), str) or not 1 <= len(line['name'].strip()) <= 40 or
                 len(line['name'].strip().splitlines()) != 1):
             raise ValueError('栏目名称须为 1 至 40 字的单行文字')
@@ -133,7 +146,7 @@ class ColumnConfig:
     def save_line(self, payload, line_id=None):
         config = self.read()
         self.expected(config, payload.get('expected_revision'))
-        allowed = {'name', 'parent_name', 'reader_motives', 'sources', 'rules', 'screening_rules', 'max_candidates', 'writing_rules', 'format', 'mode', 'valid_hours', 'edition_hours',
+        allowed = {'name', 'parent_name', 'reader_motives', 'sources', 'rules', 'group_rules', 'screening_rules', 'max_candidates', 'writing_rules', 'format', 'mode', 'valid_hours', 'edition_hours',
                    'reference_domains', 'interval_minutes', 'targets', 'auto_draft', 'draft_limit', 'draft_rules', 'enabled', 'format_policy', 'production_rules', 'production_schedule'}
         changes = payload.get('column')
         if not isinstance(changes, dict) or set(changes) - allowed:

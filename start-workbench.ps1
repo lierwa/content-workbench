@@ -5,7 +5,6 @@ $env:BSK_AUTO_START = '0'
 $taskRoot = $PSScriptRoot
 $taskPython = Join-Path $taskRoot '.venv-win\Scripts\python.exe'
 $taskData = Join-Path $taskRoot 'data\single-pass-v2'
-$taskDist = Join-Path $taskRoot 'frontend\dist\index.html'
 $taskUrl = 'http://127.0.0.1:18765/'
 $taskMutex = [System.Threading.Mutex]::new($false, 'Local\ContentWorkbench18765Startup')
 $taskAcquired = $false
@@ -34,7 +33,8 @@ try {
     if (-not $taskAcquired) { throw 'Another workbench startup is in progress. Please wait.' }
     if (-not (Test-Path -LiteralPath $taskPython -PathType Leaf)) { throw 'Missing .venv-win Python. Install project dependencies first.' }
     if (-not (Test-Path -LiteralPath $taskData -PathType Container)) { throw 'Missing data/single-pass-v2. The existing workbench data was not found.' }
-    if (-not (Test-Path -LiteralPath $taskDist -PathType Leaf)) { throw 'Missing frontend build. Run npm.cmd --prefix frontend run build.' }
+    & $taskPython (Join-Path $taskRoot 'single_pass\frontend_build.py')
+    if ($LASTEXITCODE -ne 0) { throw 'Could not build the frontend for this checkout.' }
     if ($CheckRuntime) {
         Push-Location -LiteralPath $taskRoot
         try {

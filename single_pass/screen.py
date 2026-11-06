@@ -116,6 +116,9 @@ def schema_for(items, mode='hotspot'):
 
 def short_source(item):
     out = {k:item.get(k) for k in ('ref','title','source_id','published_at') if item.get(k)}
+    if item.get('game'):
+        out['game'] = {k:v for k,v in item['game'].items() if v is not None and k not in ('price_observed','observed_at')}
+        if item.get('event_time'):out['event_time'] = item['event_time']
     if not out.get('published_at') and item.get('collected_at'):
         out['collected_at'] = item['collected_at']
     summary = (item.get('summary') or '').strip()
@@ -149,7 +152,7 @@ def initial_prompt(items, rule_text, line=None):
             if key not in headlines:
                 headlines[key] = {'title': source['title'], 'summary': source.get('summary'), 'refs': [], 'sources': []}
             headlines[key]['refs'].append(source['ref'])
-            headlines[key]['sources'].append({k:source.get(k) for k in ('source_id','published_at','collected_at') if source.get(k)})
+            headlines[key]['sources'].append({k:source.get(k) for k in ('source_id','published_at','collected_at','event_time','game') if source.get(k)})
         inputs.append({'event_id': item['ref'], 'headlines': list(headlines.values())})
     return ('你是当前栏目的选题编辑。按栏目定位、初筛规则和成稿形式判断事件是否值得进入下一轮。'
         '只用已有标题、摘要、来源和时间；综合同一事件的全部线索，不搜索正文、不编事实。'

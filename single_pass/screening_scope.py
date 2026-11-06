@@ -81,7 +81,7 @@ def resolve(workspace, spec, now=None):
     start, end = pool.instant(scope.get('start')), pool.instant(scope.get('end'))
     eligible, excluded = [], []
     for item in values:
-        stamp = pool.instant(item.get('published_at')) or pool.instant(item.get('first_seen_at'))
+        stamp = pool.effective_time(item)
         reason = ('批次中的内容已有新版本' if batch_ids and item['version'] not in versions.get(item['ref'], set()) else
                   '不在时间范围内' if not batch_ids and (not stamp or not start <= stamp <= end) else
                   '制作中或已采用' if (item['ref'], item['version']) in occupied else
@@ -89,7 +89,7 @@ def resolve(workspace, spec, now=None):
         if reason: excluded.append(dict(item, exclusion=reason))
         else: eligible.append(item)
     def order(item):
-        stamp = pool.instant(item.get('published_at')) or pool.instant(item.get('first_seen_at'))
+        stamp = pool.effective_time(item)
         return (stamp or datetime.min.replace(tzinfo=timezone.utc), item['ref'])
     eligible.sort(key=order, reverse=True)
     return dict(line=line, scope=scope, items=eligible, remaining=[], excluded=excluded,

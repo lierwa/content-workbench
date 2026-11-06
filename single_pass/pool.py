@@ -21,8 +21,11 @@ def canonical(url):
 
 
 def content_fingerprint(value):
-    return policy.digest({k: canonical(value.get(k)) if k in ('entry_url', 'url') else value.get(k)
-                          for k in ('title', 'summary', 'entry_url', 'url', 'published_at', 'event_time')})
+    basis = {k: canonical(value.get(k)) if k in ('entry_url', 'url') else value.get(k)
+             for k in ('title', 'summary', 'entry_url', 'url', 'published_at', 'event_time')}
+    if value.get('game'):
+        basis['game'] = {k:v for k,v in value['game'].items() if k not in ('observed_at','stars_observed','price_observed')}
+    return policy.digest(basis)
 
 
 def instant(value):
@@ -33,12 +36,21 @@ def instant(value):
         return None
 
 
+def effective_time(item):
+    game = item.get('game') or {}
+    if game:
+        date = game.get('changed_at') or item.get('event_time')
+        if date and instant(date):
+            return instant(date)
+    return instant(item.get('published_at')) or instant(item.get('first_seen_at'))
+
+
 def fresh(item, line, at=None):
     hours = line.get('_scope_hours', line['valid_hours'])
     if hours is None:  # Explicit batch membership defines the scope of this run.
         return True
     at = at or datetime.now(timezone.utc)
-    stamp = instant(item.get('published_at')) or instant(item.get('first_seen_at'))
+    stamp = effective_time(item)
     return bool(stamp and at - timedelta(hours=hours) <= stamp <= at)
 
 
@@ -92,6 +104,16 @@ class Pool:
                 identity = ('key:' + str(value['source_key'])) if value.get('source_key') else 'url:' + canonical(value['entry_url'])
                 ref = value['source_id'] + ':' + policy.digest(identity)[:24]
                 old = db.execute('SELECT * FROM pool_items WHERE id=?', (ref,)).fetchone()
+                if not old and value['source_id']=='game_github_tools' and (value.get('game') or {}).get('release_tag'):
+                    # Atom exposes repo ID and tag, but omits the numeric REST release ID.
+                    # Keep existing line records attached when both publishers' links match.
+                    old = db.execute("""SELECT * FROM pool_items WHERE source_id=? AND
+                        json_extract(payload, '$.game.repo_id')=? AND json_extract(payload, '$.entry_url')=?
+                        AND identity LIKE 'key:%:release:%'""",
+                        (value['source_id'],value['game']['repo_id'],value['entry_url'])).fetchone()
+                    if old:
+                        identity,ref=old['identity'],old['id']
+                        value['source_key']=json.loads(old['payload'])['source_key']
                 fingerprint = content_fingerprint(value)
                 different = bool(old and content_fingerprint(json.loads(old['payload'])) != fingerprint)
                 version = old['version'] + int(different) if old else 1

@@ -104,7 +104,14 @@ def _read(url, timeout, entry=False):
     if trafilatura is None:
         raise ValueError('缺少 trafilatura，无法提取正文')
     deadline = time.monotonic() + timeout
-    final_url = url
+    parts = urllib.parse.urlsplit(url)
+    article = (re.fullmatch(r'/articles/(\d+)/?',parts.path)
+               if not entry and parts.hostname == 'www.gcores.com' and parts.scheme == 'https' else None)
+    license_match=(re.fullmatch(r'/([\w.-]+/[\w.-]+)/blob/([\w./-]+/(?:LICENSE|LICENCE|COPYING)(?:\.\w+)?)',parts.path,re.I)
+                   if not entry and parts.hostname=='github.com' and parts.scheme=='https' else None)
+    final_url = 'https://www.gcores.com/gapi/v1/articles/'+article[1] if article else url
+    if license_match:
+        final_url=f'https://raw.githubusercontent.com/{license_match[1]}/{license_match[2]}'
     for redirects in range(4):
         parsed, address = _validate_url(final_url, max(0.1, deadline - time.monotonic()), entry=entry)
         port = parsed.port or (443 if parsed.scheme == 'https' else 80)
@@ -121,8 +128,17 @@ def _read(url, timeout, entry=False):
             conn.sock = sock
             path = urllib.parse.urlunsplit(('', '', parsed.path or '/', parsed.query, ''))
             host_header = parsed.hostname if port in (80, 443) else f'{parsed.hostname}:{port}'
-            conn.request('GET', path, headers={'Host': host_header, 'User-Agent': 'Mozilla/5.0',
-                         'Accept': 'text/html', 'Accept-Encoding': 'identity'})
+            from .collect import request_headers
+            headers={'Accept':'text/html',**request_headers(final_url),'Host':host_header,'Accept-Encoding':'identity'}
+            if article:
+                if parsed.hostname != 'www.gcores.com' or parsed.path != '/gapi/v1/articles/'+article[1]:
+                    raise ValueError('机核正文接口重定向到其他文章或站点')
+                headers['Accept']='application/vnd.api+json'
+            if license_match:
+                if parsed.hostname!='raw.githubusercontent.com' or parsed.path!='/'+license_match[1]+'/'+license_match[2]:
+                    raise ValueError('许可证重定向到了另一个项目或文件')
+                headers['Accept']='text/plain'
+            conn.request('GET', path, headers=headers)
             response = conn.getresponse()
             if response.status in (301, 302, 303, 307, 308):
                 if redirects == 3 or not response.getheader('Location'):
@@ -131,7 +147,12 @@ def _read(url, timeout, entry=False):
                 continue
             if response.status != 200:
                 raise ValueError(f'HTTP {response.status}')
-            if response.headers.get_content_type() not in ('text/html', 'application/xhtml+xml'):
+            mime=response.headers.get_content_type()
+            if article and mime not in ('application/json','application/vnd.api+json'):
+                raise ValueError('机核文章接口未返回正文 JSON')
+            if license_match and mime not in ('text/plain','application/octet-stream'):
+                raise ValueError('未取得仓库许可证原文')
+            if not article and not license_match and mime not in ('text/html', 'application/xhtml+xml'):
                 raise ValueError('响应不是 HTML 文字页面')
             if response.headers.get('Content-Encoding', 'identity').lower() not in ('', 'identity'):
                 raise ValueError('不支持压缩正文')
@@ -144,6 +165,16 @@ def _read(url, timeout, entry=False):
         finally:
             conn.close()
             sock.close()
+    if license_match:
+        text=page.strip()
+        if len(text)<80:raise ValueError('许可证正文不足')
+        return {'final_url':url,'title':license_match[1]+' LICENSE','content':text,
+                'content_sha256':hashlib.sha256(text.encode()).hexdigest(),'content_kind':'license',
+                'payload_url':final_url,'payload_sha256':hashlib.sha256(raw).hexdigest(),
+                'links':[],'article_links':[],'images':[],'images_version':IMAGES_VERSION}
+    if article:
+        from .game_sources import gcores_material
+        return gcores_material(raw,url,final_url,article[1])
     return parse_material(page, final_url, entry=entry)
 
 
@@ -151,8 +182,10 @@ def parse_material(page, final_url, entry=False):
     """Use the same extractor for HTTP HTML and a browser-rendered document."""
     if trafilatura is None:
         raise ValueError('缺少 trafilatura，无法提取正文')
-    text = trafilatura.extract(page, url=final_url, output_format='txt', include_comments=False,
-                               include_tables=True, favor_precision=True)
+    from .game_sources import game_detail
+    specific = game_detail(final_url,page)
+    text = specific.get('content') if specific is not None else trafilatura.extract(
+        page, url=final_url, output_format='txt', include_comments=False, include_tables=True, favor_precision=True)
     if not entry and (not text or len(text.strip()) < 80):
         raise ValueError('未取得足够的正文，可能是导航、脚本、登录或验证页')
     text = (text or '').strip()
@@ -225,6 +258,10 @@ def parse_material(page, final_url, entry=False):
     # Anchor and its surrounding passage must actually appear in the extracted
     # article. Site menus and recommended-story lists are not evidence leads.
     article_links = []
+    if specific and 'gallery' in specific['fields']:
+        images=specific['fields']['gallery']
+    elif specific and 'author_images' in specific['fields']:
+        images=specific['fields']['author_images']
     for anchor in image_page.xpath('//p/a[@href]'):
         label = anchor.text_content().strip()
         passage = anchor.getparent().text_content().strip()
@@ -236,7 +273,8 @@ def parse_material(page, final_url, entry=False):
             'images': images, 'images_version': IMAGES_VERSION,
             'publisher': getattr(metadata, 'sitename', None), 'author': getattr(metadata, 'author', None),
             'published_at': published.value, 'event_at': None,
-            'content': text, 'content_sha256': hashlib.sha256(text.encode('utf-8')).hexdigest()}
+            'content': text, 'content_sha256': hashlib.sha256(text.encode('utf-8')).hexdigest(),
+            **({'game_detail':specific['fields']} if specific is not None else {})}
 
 
 def fetch_material(url, timeout=15, entry=False):
@@ -317,7 +355,11 @@ def resolve_original(item, cancel):
     evidence.append({'kind':'fetch', 'url':target, 'final_url':material.get('final_url'), 'fetched_at':material['fetched_at']})
     row.update(original_url=target, original_status='resolved' if material['status']=='read' else 'unavailable',
         resolution_evidence=evidence)
-    return row, bind_material(material, 'original', [row['ref']])
+    original=bind_material(material, 'original', [row['ref']])
+    if material['status']=='read' and item.get('source_id') in ('game_github_tools','game_godot_tools','game_github_trending','game_itch_tools'):
+        from .game_sources import tool_references
+        return row,[original,*tool_references(item,original,cancel)]
+    return row,original
 
 
 def verify_quote(content, quote):

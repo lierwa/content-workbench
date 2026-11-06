@@ -41,8 +41,16 @@ def now():
     return dt.datetime.now(TZ).isoformat(timespec="seconds")
 
 
+def request_headers(url):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    if urlsplit(url).hostname == 'news.xbox.com':
+        headers = {'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+                   'Accept':'text/html,application/xhtml+xml,*/*;q=0.8'}
+    return headers
+
+
 def fetch(url):
-    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    request = urllib.request.Request(url, headers=request_headers(url))
     with urllib.request.urlopen(request, timeout=12) as response:
         body = response.read(3_000_001)
         if len(body) > 3_000_000:
@@ -209,6 +217,15 @@ READERS = {'rss':parse_rss, 'tophub':parse_tophub, 'toutiao':parse_toutiao, 'bai
 
 
 def parse_source(source, raw):
+    if CATALOG[source].get('reader') == 'game':
+        from . import game_sources
+        if source=='game_itch_tools':
+            return list(game_sources.itch_tools(raw,source,now()))
+        if source in game_sources.PARSERS:
+            return list(game_sources.PARSERS[source](raw,source,now()))
+        if source in ('game_ps_blog','game_gcores'):
+            return parse_rss(raw,source)
+        raise ValueError('多页游戏来源须通过采集器读取并保存完整快照')
     reader = READERS.get(CATALOG[source].get('reader'))
     if reader is None:
         raise ValueError('渠道缺少对应的读取器')

@@ -676,7 +676,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise TypeError('确认发布必须包含每篇稿件的确认快照')
                 if approvals is not None and not isinstance(approvals, dict):
                     raise TypeError('expected_approvals 必须是对象')
-                result = service.action(ids, action, revisions, approvals)
+                result = service.action(ids, action, revisions, approvals,use_current_rules=body.get('use_current_rules',False))
             else:
                 platform = body.get('platform')
                 if platform not in ('wechat', 'toutiao'):

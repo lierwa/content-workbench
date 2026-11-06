@@ -61,7 +61,7 @@ def listing(workspace, query):
 
 def detail(workspace, key):
     all_batches = batches(workspace)
-    key = next((record_id(b) for b in all_batches if b['id'] == key), key)
+    key = next((record_id(b) for b in all_batches if b['id'] == key or key in b.get('former_record_ids', [])), key)
     rows = [b for b in all_batches if record_id(b) == key]
     if not rows:
         raise ValueError('选题记录不存在')

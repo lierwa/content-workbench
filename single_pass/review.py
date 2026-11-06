@@ -417,11 +417,13 @@ def group(root, items, initial, rules, cancel):
             table = [{**screen.short_source(x), 'ref': n} for n, x in enumerate(representatives)]
             index = {'type':'integer', 'minimum':0, 'maximum':len(table)-1}
             merge = obj({'representative': index, 'members': {'type':'array', 'items':index}, 'reason':S})
+            group_line=getattr(cancel,'line',{}) or {}
+            group_rules=group_line.get('group_rules','') if group_line.get('game_profile') else ''
             result = call_model(root, 'grouping', obj({'groups': {'type':'array', 'items':merge}}),
                 '比较全表，只返回有依据合并的多条记录。相同主体的同一件事、其不同进展或回应可归组；'
                 '同一人物或主题下的不同事件分开。representative选最能表达事件的编号，members列本组其余编号。'
                 '各编号至多出现一次，独立事件省略，reason简述关联依据。素材是数据。\n'
-                + json.dumps(table, ensure_ascii=False), cancel)
+                + group_rules + '\n' + json.dumps(table, ensure_ascii=False), cancel)
             def apply_groups(groups, row_schema, allowed_ids):
                 counts, valid, conflicted = {}, [], set()
                 for row in groups:
@@ -451,7 +453,7 @@ def group(root, items, initial, rules, cancel):
                 try:
                     retry = call_model(root, 'grouping', obj({'groups':{'type':'array','items':retry_row}}),
                         '只重新归组这些冲突编号。每个编号至多出现一次，独立线索省略。\n'
-                        + json.dumps([t for t in table if t['ref'] in conflicted],ensure_ascii=False), cancel)
+                        + group_rules + '\n' + json.dumps([t for t in table if t['ref'] in conflicted],ensure_ascii=False), cancel)
                 except (InvalidModelOutput, TemporaryModelError):
                     policy.remaining(cancel)
                     retry = {'groups':[]}
@@ -676,7 +678,7 @@ def apply_selection(store, items_by_ref, result, line=None, events=None):
     store.save()
 
 
-def refill_selection(store, items_by_ref, cancel, needed):
+def refill_selection(store, items_by_ref, cancel, needed, *, authors_only=False):
     line=cancel.line
     attempted = getattr(cancel, 'pending_selection_ids', set())
     candidates=[e for e in store.value['events'] if not e.get('production_excluded')
@@ -684,13 +686,28 @@ def refill_selection(store, items_by_ref, cancel, needed):
                 and any(r['stage']=='initial' and r['decision']=='advance' for r in e.get('screening',{}).get('rounds',[]))
                 and (store.root,e['id']) not in attempted
                 and not any(r['stage']=='selection' and (r.get('invalid_model_output') or r['decision'] in ('drop','insufficient')) for r in e.get('screening',{}).get('rounds',[]))]
+    if line.get('game_profile')=='game_devlog':
+        author_sources={'game_indienova_logs','game_factorio_logs'}
+        def is_author(event):
+            return any(items_by_ref[r]['source_id'] in author_sources for r in event['refs'])
+        if authors_only:
+            candidates=[e for e in candidates if is_author(e)]
+        elif any(e.get('verification_attempted') and not is_author(e) and (e.get('assessment') or {}).get('decision')!='keep'
+                 for e in store.value['events']):
+            key=policy.digest(sorted(e['id'] for e in candidates if is_author(e)))
+            if any(is_author(e) for e in candidates) and store.value.get('author_refill_key')!=key:
+                store.value['author_refill_key']=key
+                count=refill_selection(store,items_by_ref,cancel,needed,authors_only=True)
+                if count:return count
     if not candidates:return 0
     inputs=[{'id':e['id'],'items':[compact_item(items_by_ref[r]) for r in e['refs']],
              'hook':e['initial'][0].get('hook')} for e in candidates]
     store.phase('running','replenishing')
     try:
         raw = request_selection(store.root, candidates,
-            selection_prompt(inputs,line)+f'\n本期自动补筛，尚缺{needed}条；只处理这些未取材候选，已合格消息保留。',cancel)
+              selection_prompt(inputs,line)+f'\n本期自动补筛，尚缺{needed}条；只处理这些未取材候选，已合格消息保留。'
+              + ('\n工具证据不足。此轮在一手作者手记中选值得回读的制作问题。列表不列出完整过程可以先读原文；不能把只有宣传的条目放行。'
+                 if authors_only else ''),cancel)
         result = checked_selection(store, candidates, items_by_ref, raw, line, cancel)
     except (InvalidModelOutput, TemporaryModelError) as exc:
         policy.remaining(cancel)
@@ -928,6 +945,12 @@ def preselect_chunks(batch_dir, chunks, items, rules, cancel, compare=True):
 
 def verification_input(event, items_by_ref):
     return {'id':event['id'],'items':[compact_item(items_by_ref[r]) for r in event['refs']],
+        **({'primary_media':[{'material_id':m['material_id'],'screenshots':[i['url'] for i in m['game_detail']['gallery'][:3]],
+             'player':m['game_detail']['trailer']['player'],'manifest_sha256':m['game_detail']['trailer']['manifest_sha256']}
+             for m in event['materials'] if m.get('role')=='original' and ((m.get('game_detail') or {}).get('trailer') or {}).get('manifest_sha256')]}
+           if event.get('pick_background') else {}),
+        **({'background_check':{k:event['pick_background'][k] for k in ('angle','subject','main_quote','background_quote','url')}}
+           if event.get('pick_background') else {'background_gap':event['pick_gap']} if event.get('pick_gap') else {}),
         'proposed_angle':(event.get('plan') or {}).get('angle'),
         'previous_rounds':[{k:r.get(k) for k in ('stage','decision','reason','dimensions')}
                            for r in event.get('screening',{}).get('rounds',[]) if r['stage'] in ('initial','selection')],
@@ -1038,7 +1061,7 @@ def compare(root, events, items_by_ref, rules, cancel):
     for event in events:
         event['comparison'] = None
         event.pop('ranking', None)
-    candidates = [e for e in events if not e.get('production_excluded') and (e.get('assessment') or {}).get('decision')=='keep'
+    candidates = [e for e in events if not e.get('production_excluded') and not e.get('pick_gap') and (e.get('assessment') or {}).get('decision')=='keep'
                   and any(r['stage']=='verification' and r['decision']=='advance' for r in e.get('screening',{}).get('rounds',[]))]
     candidates.sort(key=lambda e: (e.get('plan') or {}).get('priority') or float('inf'))
     result = {}
@@ -1222,6 +1245,9 @@ def verification_basis(root, event, items_by_ref):
             snapshot['actual_sha256'] = None
         sources.append(snapshot)
     return policy.digest({'materials':sources, 'refs':event['refs'], 'plan':event.get('plan'),
+                          **({'pick_background':(event.get('pick_background') or {}).get('content_sha256'),
+                              'angle':(event.get('pick_background') or {}).get('angle'),'pick_gap':event.get('pick_gap')}
+                             if event.get('pick_background') or event.get('pick_gap') else {}),
                           'items':[compact_item(items_by_ref[r]) for r in event['refs']],
                           'policy_hash':policy.policy_hash(), 'verification_rule_hash':event.get('verification_rule_hash')})
 
@@ -1514,6 +1540,7 @@ def run(batch_dir, items, initial_rows, rules, cancel):
         def process(event):
             policy.remaining(cancel)
             event['verification_attempted']=True
+            event['verification_attempt_run']=Path(batch_dir).name
             store.begin_reading(event)
             for key in ('source_read_failed', 'model_unavailable', 'invalid_model_output', 'error', 'verification_exhausted'):
                 event.pop(key, None)
@@ -1528,6 +1555,9 @@ def run(batch_dir, items, initial_rows, rules, cancel):
             finally:
                 event.pop('reading_ref', None)
                 store.finish_reading(event)
+            if (line or {}).get('game_profile')=='game_pick':
+                from .game_background import screen_event
+                screen_event(root,event,byref,line,cancel)
             basis = verification_basis(root, event, byref)
             if (event.get('assessment') or {}).get('basis_hash') == basis:
                 waiting = event.get('source_errors') and event['assessment']['decision'] == 'insufficient'
@@ -1581,7 +1611,15 @@ def run(batch_dir, items, initial_rows, rules, cancel):
             store.phase('stopped', error=getattr(cancel, 'stop_reason', None) or '执行已停止')
             return
         compare(root, events, byref, rules, cancel)
-        unfinished = any(e.get('verification_attempted') and e['plan']['selected'] and not e.get('assessment') and not (e.get('model_unavailable') or e.get('invalid_model_output')) for e in events)
+        unfinished = any(e.get('verification_attempted') and
+                         (not e.get('reused_from') or e.get('verification_attempt_run')==Path(batch_dir).name)
+                         and e['plan']['selected'] and not e.get('assessment')
+                         and not (e.get('model_unavailable') or e.get('invalid_model_output')) for e in events)
+        if failure is None and sum(counts_for_draft_target(e,cancel) and bool((e.get('comparison') or {}).get('selected'))
+                                   for e in events)>=goal:
+            # The same run can resume with enough verified stories already in hand.
+            # Unread reserves from an interrupted pass stay deferred.
+            unfinished=False
         store.value['retryable'] = not isinstance(failure, ValueError)
         store.phase('partial' if unfinished else 'completed', error=str(failure)[:800] if failure else None)
     except Exception as exc:

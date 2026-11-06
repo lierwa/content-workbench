@@ -312,8 +312,9 @@ def screening_context(packet):
 
 
 def source_texts(packet):
-    return [{k: m.get(k) for k in ('material_id','role','origin_ref','url','final_url','title',
-                                     'author','publisher','published_at','content')}
+    return [{**{k: m.get(k) for k in ('material_id','role','origin_ref','url','final_url','title',
+                                     'author','publisher','published_at','content')},
+             **{k:m[k] for k in ('usage','subject','applies_to_refs','angle','main_quote','background_quote') if k in m}}
             for m in packet['materials'] if m.get('status') == 'read']
 
 
@@ -393,6 +394,23 @@ def supplement(root, packet, issues, cancel):
     return additions, '；'.join(errors) or ('已读取正文引用材料' if additions else '现有链接不能回答审稿缺口')
 
 
+def game_reader_link(packet, value):
+    profile=(packet.get('line') or {}).get('game_profile')
+    if profile not in ('game_pick','game_devlog') or (packet['line'].get('format_policy') or {}).get('body_images')=='none':
+        return value
+    originals=[m for m in packet['materials'] if m.get('role')=='original' and m.get('status')=='read']
+    if profile=='game_pick':
+        trailer=next((m['game_detail']['trailer'] for m in originals if (m.get('game_detail') or {}).get('trailer')),None)
+        if not trailer:raise ValueError('成稿缺少主推演示播放器')
+        url,label=trailer['player'],'观看官方预告（Steam 商店播放器）'
+    elif originals:
+        url,label=originals[0]['url'],'阅读开发者原文'
+    else:return value
+    if url not in value['markdown']:
+        value['markdown']=value['markdown'].rstrip()+f'\n\n[{label}]({url})'
+    return value
+
+
 def format_context(packet):
     from . import column_policy
     line = packet.get('line') or {'format': packet.get('format', 'single')}
@@ -440,6 +458,9 @@ def research(root, packet, cancel):
         raise ValueError('没有可核验的来源正文')
     # Selection has already fetched and assessed these sources. Do not pay for
     # the same research on every account. Omit unsupported claims in drafting.
+    if (packet.get('line') or {}).get('game_profile') == 'game_pick':
+        from .game_background import prepare
+        return prepare(root,packet,checked,cancel)
     if not packet.get('refresh_sources'):
         # Retain failed-source metadata too: account jobs share this snapshot's
         # fingerprint when reusing a draft before their own research stage.
@@ -475,12 +496,18 @@ def research(root, packet, cancel):
     return {'materials': checked + additions, 'unknowns':found['unknowns']}
 
 
-def platform_body(markdown, cover_url=None, caption='资料图'):
+def platform_body(markdown, cover_url=None, caption='资料图', *, job=None):
     from lxml import html as lhtml
     wrapper = lhtml.fragment_fromstring(import_markdown(markdown), create_parent='section')
-    # Both editors keep source agency text. Source URLs remain in provenance.
+    allowed=set()
+    if job and job['target']['platform']=='local' and (job['packet'].get('line') or {}).get('game_profile'):
+        for source in job['packet']['materials']:
+            if source.get('status')!='read':continue
+            allowed.update((source.get('url'),source.get('final_url')))
+            trailer=(source.get('game_detail') or {}).get('trailer') or {}
+            if trailer.get('manifest_sha256'):allowed.add(trailer['player'])
     for link in wrapper.xpath('.//a'):
-        link.drop_tag()
+        if link.get('href') not in allowed:link.drop_tag()
     if cover_url:
         picture = lhtml.Element('figure')
         picture.append(lhtml.Element('img', src=cover_url, alt=caption or '原帖配图'))
@@ -588,7 +615,7 @@ def write(root, job, cancel):
         raise ValueError('生成的标题或正文为空')
     if (job['target']['platform'] == 'toutiao' or job.get('shared_title_max') == 30) and not 2 <= title_units(value['title'].strip()) <= 30:
         raise ValueError('头条文章标题须为2至30字，请重新生成')
-    return value
+    return game_reader_link(packet,value)
 
 
 @review.correct_invalid_output
@@ -638,6 +665,7 @@ def edit(root, job, cancel, proof_required=True):
         raise ValueError('头条文章标题须为2至30字，请重新生成')
     if not strip_repeated_title(value['markdown'], value['title']).strip():
         raise ValueError('编辑结果只有标题，没有正文')
+    game_reader_link(job['packet'],value)
     current = (job.get('draft') or {}).get('body_html')
     if current:
         existing_links = {x['href'] for x in semantic_html(current)['links']}

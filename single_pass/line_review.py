@@ -193,7 +193,13 @@ def execute(root, database, line, cancel, records):
         if len(previous_runs) == 1 and all(records.get(i['ref'], {}).get('version') == i['version'] for i in items):
             prior = root.parent / next(iter(previous_runs)) / 'review' / 'all-events.json'
             old_groups = json.loads(prior.read_text(encoding='utf-8')) if prior.exists() else []
-            if {r for e in old_groups for r in e['refs']} == set(byref):
+            same_group_rules=True
+            if line.get('game_profile') and old_groups:
+                old_batch=prior.parent.parent/'batch.json'
+                old_line=json.loads(old_batch.read_text(encoding='utf-8'))['line'] if old_batch.exists() else {}
+                same_group_rules=(old_line.get('game_profile')==line['game_profile'] and
+                                  old_line.get('group_rules')==line.get('group_rules'))
+            if same_group_rules and {r for e in old_groups for r in e['refs']} == set(byref):
                 screen.write_json(store.root / 'grouping-map.json', {r: {'canonical_ref': e['id'],
                     'relation_reason': e.get('grouping', {}).get(r, '复用未变化的分组依据')} for e in old_groups for r in e['refs']})
         groups = review.group(store.root, items, None, rules, cancel)
@@ -219,6 +225,10 @@ def execute(root, database, line, cancel, records):
                     previous = None
                 if previous:
                     previous = copy.deepcopy(previous)
+                    # A reserve may not be read again if the new edition already has
+                    # enough stories. An attempt from another run is not pending work.
+                    previous.pop('verification_attempted',None)
+                    previous.pop('verification_attempt_run',None)
                     previous['materials'] = [review.persist_material(store.root, review.material_content(prior_root, m)) for m in previous.get('materials', [])]
                     for ref, source in previous.get('sources', {}).items():
                         if ref in byref:
@@ -285,6 +295,9 @@ def execute(root, database, line, cancel, records):
         previous = next((e for e in saved if e['id'] == record['result_ref']), None)
         if not previous:
             continue
+        if item['ref'] in (previous.get('source_errors') or {}) or any(
+                item['ref'] in m.get('origin_ref',[]) and m.get('status')!='read' for m in previous.get('materials',[])):
+            continue
         material = [review.material_content(prior_root, m) for m in previous.get('materials', [])
                     if item['ref'] in m.get('origin_ref', []) and review.usable_material(prior_root, m)]
         if material:
@@ -318,6 +331,11 @@ def execute(root, database, line, cancel, records):
             review.run(root, items, rows, rules, cancel)
             current=review.Store(store.root,0)
             if current.value['status']!='completed':break
+            if line.get('game_profile')=='game_pick':
+                for event in current.value['events']:
+                    if (event.get('comparison') or {}).get('selected') and not event.get('pick_background'):
+                        event['comparison']={'selected':False,'reason':event.get('pick_gap') or '未核实玩法对照'}
+                current.save()
             kept=sum(review.counts_for_draft_target(e, cancel) and bool((e.get('comparison') or {}).get('selected'))
                      for e in current.value['events'])
             if kept>=goal:

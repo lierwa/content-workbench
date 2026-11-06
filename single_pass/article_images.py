@@ -176,6 +176,9 @@ def _visual_plan(folder, job, body, choices, related, media_dir, cancel):
     schema = review.obj({'cover_id': {'enum': [''] + cover_ids}, 'cover_reason': review.S,
         'body_images': {'type': 'array', 'maxItems': 0 if config['body_images']=='none' else config['max_body_images'], 'items': placement},
         'relations': {'type': 'array', 'items': relation}})
+    pick=(job['packet'].get('line') or {}).get('game_profile')=='game_pick' and config['body_images']!='none'
+    if pick:
+        schema['properties']['body_images']['minItems']=2
     payload = {'title': job['draft'].get('title') or job['edited']['title'],
         'paragraphs': list(enumerate(paragraphs)),
         'sources': [{k: m.get(k) for k in ('material_id', 'title', 'url', 'content')}
@@ -318,6 +321,10 @@ def prepare(root, media_dir, job, body, cancel):
              'images_version': materials.IMAGES_VERSION, 'fallback_sha256': manifest['sha256'],
              'text_hash': editorial.text_fingerprint(job['draft'].get('title') or job['edited']['title'], body),
              'materials': [(m.get('material_id'), m.get('content_sha256'), m.get('status')) for m in job['packet']['materials']]}
+    pick=(job['packet'].get('line') or {}).get('game_profile')=='game_pick' and config['body_images']!='none'
+    if pick:
+        basis['game_gallery']=[(m['material_id'],m['game_detail']['gallery']) for m in job['packet']['materials']
+                               if m.get('role')=='original' and (m.get('game_detail') or {}).get('trailer')]
     key = hashlib.sha256(json.dumps(basis, sort_keys=True).encode()).hexdigest()
     with _locks_guard:
         gate = _locks.setdefault(key, threading.Lock())
@@ -339,6 +346,9 @@ def prepare(root, media_dir, job, body, cancel):
                     return None
             needs=None
             sources=job['packet']['materials']
+            if pick:
+                sources=[dict(m,images=m['game_detail']['gallery']) for m in sources if
+                         m.get('role')=='original' and (m.get('game_detail') or {}).get('trailer')]
             if config['body_images']=='essential':
                 needs = []
                 if config['max_body_images'] and config['max_images_per_item']:
@@ -349,6 +359,8 @@ def prepare(root, media_dir, job, body, cancel):
                 job=dict(job,image_need_ids=[n['entry_id'] for n in needs or []])
                 skip_images=not needs and config['cover']=='default'
             budget=min(12,max(2,2*((len(needs) if needs is not None else config['max_body_images'])+int(config['cover']!='default'))))
+            if (job['packet'].get('line') or {}).get('game_profile') == 'game_devlog':
+                budget = max(budget, 8)  # An author's illustrated log can cover several distinct changes.
             choices=[] if skip_images else _choices(media_dir,job['id'],sources,issues,limit=budget)
             plan=optional_step('image_selection', _visual_plan, folder,job,body,choices,[],media_dir,cancel) if choices else None
             search={'status':'not_needed','reason':'按栏目及实际消息需要准备图片','needs':needs}
@@ -388,6 +400,8 @@ def prepare(root, media_dir, job, body, cancel):
                     reason = '原帖及补搜报道没有通过核实的同事件图片'
                 plan = {'cover_id':'', 'cover_reason':reason, 'body_images':[], 'relations':[]}
             _check_required_images(job, body, needs, plan['body_images'], choices)
+            if pick and len(plan['body_images'])<2:
+                raise ValueError('新作正文未能取得两张与段落对应的官方实机截图：'+str(issues)[:380])
             saved = {'key': key, 'basis': basis, 'selection': plan, 'search': search, 'issues': issues,
                      'candidates': [{k: v for k, v in c.items() if k != 'asset'} for c in choices]}
             if cancel.is_set():

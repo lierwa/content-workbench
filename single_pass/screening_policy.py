@@ -43,6 +43,10 @@ def stage_hash(line, stage):
     from . import column_policy
     return digest({'format':line.get('format', 'single'), 'format_selection': column_policy.screening_settings(line), 'contract': 'column-workflow-6',
         'scope':line.get('rules',''),'stage':stage,'rules':stage_rules(line,stage),
+        **({'game_group':line.get('group_rules'),'game_profile':line['game_profile']} if line.get('game_profile') else {}),
+        **({'verified_gallery_contract':1} if stage=='verification' and line.get('game_profile')=='game_pick'
+           and (line.get('format_policy') or {}).get('body_images') not in (None,'none') else {}),
+        **({'game_tool_license_reader':3} if stage=='verification' and line.get('game_profile')=='game_devlog' else {}),
         **({'timeliness_contract':1} if stage=='verification' and line.get('format')=='digest' else {}),
         **({'reader_motives':reader_motives(line)} if stage=='verification' and line.get('format')!='digest' else {}),
         **({'max_candidates':selection_limit(line)} if stage=='selection' else {}),

@@ -42,6 +42,11 @@ def source_hash(job):
                actual_content_hash=hashlib.sha256(s['content'].encode()).hexdigest() if isinstance(s.get('content'),str) else s.get('content_sha256'))
                for s in packet.get('materials',[])]}
     dates = publication_evidence(packet)
+    if (packet.get('line') or {}).get('game_profile') in ('game_pick','game_devlog') and (packet['line'].get('format_policy') or {}).get('body_images')=='optional':
+        value['reader_media_contract']=2
+    if any(s.get('usage')=='background' for s in packet.get('materials',[])):
+        value['background']=[{k:s.get(k) for k in ('material_id','usage','subject','applies_to_refs','angle','main_quote','background_quote')}
+                             for s in packet['materials'] if s.get('usage')=='background']
     if dates:
         value['publication_evidence'] = dates
     questions = sorted({v['reader_question'] for v in (packet.get('draft_decisions') or {}).values()
@@ -111,6 +116,8 @@ def image_descriptions(draft):
 
 def reader_fields_hash(draft):
     fields = [draft.get('summary') or '', image_descriptions(draft)]
+    links=composition.semantic_html(draft.get('body_html') or draft.get('html') or '')['links']
+    if links:fields.append(links)
     return hashlib.sha256(json.dumps(fields, ensure_ascii=False).encode()).hexdigest()
 
 
@@ -263,6 +270,7 @@ def numbered_sources(sources, *, include_attribution=True):
     catalog = []
     for source in sources:
         row = {k:source.get(k) for k in ('material_id','role','origin_ref','url','final_url','title','author','publisher','published_at')}
+        row.update({k:source[k] for k in ('usage','subject','applies_to_refs','angle','main_quote','background_quote') if k in source})
         for field in (('content','author','publisher') if include_attribution else ('content',)):
             numbered = {}
             for text in dict.fromkeys(source_sentences(source.get(field))):
@@ -305,7 +313,9 @@ def inspect(root, job, draft, cancel):
     headings = {sentence for node in tree.xpath('.//h1|.//h2|.//h3|.//h4|.//h5|.//h6')
                 for sentence in source_sentences(composition.normalize_text(node.text_content()))}
     refs = {item['ref'] for item in job['packet'].get('items', [])}
-    sources = [x for x in job['packet']['materials'] if x.get('status') == 'read' and refs.intersection(x.get('origin_ref') or [])]
+    sources = [x for x in job['packet']['materials'] if x.get('status') == 'read' and (
+        refs.intersection(x.get('origin_ref') or []) or (x.get('role')=='reference' and x.get('usage')=='background'
+        and refs and set(x.get('applies_to_refs') or [])==refs))]
     if any(not s.get('content') or hashlib.sha256(s['content'].encode()).hexdigest() != s.get('content_sha256') for s in sources):
         raise ValueError('审稿来源正文与留档不一致')
     source_rows, excerpts = numbered_sources(sources)
@@ -334,6 +344,13 @@ def inspect(root, job, draft, cancel):
     payload['verified_excerpts'] = [index for row in source_rows for index,text in row['content'].items()
         if any(f.get('material_id') == row['material_id'] and materials.verify_quote(text, f.get('quote'))
                for f in (job['packet'].get('assessment') or {}).get('facts', []))]
+    if (job['packet'].get('line') or {}).get('game_profile'):
+        payload['reader_links']=composition.semantic_html(html)['links']
+        payload['visual_phase']=('已排版，检查正文配图' if draft.get('body_image_hashes') else
+                                '文字独审。实机截图在文字过审后的配图阶段下载、看图选取并核验，此阶段仅核素材及链接。')
+        payload['official_media']=[{'subject':m['game_detail'].get('name'),'screenshots':len(m['game_detail'].get('gallery',[])),
+                                    'trailer':m['game_detail']['trailer']} for m in sources
+                                   if m.get('role')=='original' and (m.get('game_detail') or {}).get('trailer')]
     dates = publication_evidence(job['packet'])
     if dates:
         payload['publication_evidence'] = dates
@@ -393,6 +410,18 @@ def inspect(root, job, draft, cancel):
 def approved(job):
     draft = job.get('draft') or {}
     verdict = job.get('editorial_review') or {}
+    packet=job.get('packet') or {}; line=packet.get('line') or {}
+    if (job.get('target') or {}).get('platform')=='local' and line.get('game_profile')=='game_pick' and (line.get('format_policy') or {}).get('body_images') not in (None,'none'):
+        sources=[m['game_detail'] for m in packet.get('materials',[]) if m.get('role')=='original'
+                 and ((m.get('game_detail') or {}).get('trailer') or {}).get('manifest_sha256')]
+        html=composition.semantic_html(draft.get('body_html') or '')
+        images={i['src'] for i in html['images']}
+        placements=(job.get('image_plan') or {}).get('body_images') or []
+        if not any(s['trailer']['player'] in {link['href'] for link in html['links']} and
+                   len({i['original_url'] for i in placements if i['local_url'] in images
+                        and (draft.get('body_image_hashes') or {}).get(i['local_url'])==i['sha256']
+                        and i['original_url'] in {pic['url'] for pic in s['gallery']}})>=2 for s in sources):
+            return False
     return (not job.get('changed_source_refs') and verdict.get('passed') is True and verdict.get('decision')=='pass'
         and not article_renderer.reader_issues(draft) and verdict.get('reader_fields_hash') == reader_fields_hash(draft)
         and verdict.get('policy_version')==standard()['version'] and verdict.get('policy_hash')==standard_hash()
